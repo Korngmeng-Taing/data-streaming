@@ -1,0 +1,174 @@
+volumes:
+  crypto-dwh:
+  crypto-checkpoints:
+  crypto-model:
+  kafka-data:
+
+networks:
+  crypto-net:
+    driver: bridge
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: crypto-zookeeper
+    networks: [crypto-net]
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: echo srvr | nc -w 2 localhost 2181 || exit 1
+      interval: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: crypto-kafka
+    networks: [crypto-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: nc -z localhost 9092 || exit 1
+      interval: 10s
+      retries: 15
+      start_period: 30s
+
+  init-kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: crypto-init-kafka
+    networks: [crypto-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topic...'
+      kafka-topics --bootstrap-server kafka:9092 --create \
+        --topic crypto-prices --partitions 3 --replication-factor 1 --if-not-exists
+      echo 'Topic created.'
+      "
+
+  crypto-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - SPARK_VERSION=3.5.0
+    container_name: crypto-producer
+    networks: [crypto-net]
+    depends_on:
+      init-kafka:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: crypto-prices
+      CRYPTO_API_BASE_URL: https://api.coingecko.com/api/v3
+      CRYPTO_IDS: bitcoin,ethereum,solana,cardano,polkadot
+      VS_CURRENCY: usd
+    restart: unless-stopped
+    command: python api/crypto_producer.py
+
+  spark-streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - SPARK_VERSION=3.5.0
+    container_name: crypto-spark-streaming
+    networks: [crypto-net]
+    depends_on:
+      init-kafka:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: crypto-prices
+      OUTPUT_PATH: /data/dwh
+      CHECKPOINT_DIR: /data/checkpoints
+      SPARK_MASTER: local[2]
+    volumes:
+      - crypto-dwh:/data/dwh
+      - crypto-checkpoints:/data/checkpoints
+    restart: unless-stopped
+    command: python spark/streaming_job.py
+
+  ml-train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - SPARK_VERSION=3.5.0
+    container_name: crypto-ml-train
+    networks: [crypto-net]
+    depends_on:
+      spark-streaming:
+        condition: service_started
+    environment:
+      OUTPUT_PATH: /data/dwh
+      MODEL_PATH: /model
+      SPARK_MASTER: local[2]
+    volumes:
+      - crypto-dwh:/data/dwh
+      - crypto-model:/model
+    command: >
+      sh -c "
+        echo 'Waiting for gold data to accumulate...';
+        sleep 60;
+        while true; do
+          if python ml/train.py --gold-path /data/dwh/gold --model-dir /model; then
+            echo 'Training completed. Next retry in 5 min...';
+          else
+            echo 'Training failed. Retrying in 60s...';
+            sleep 60;
+            continue;
+          fi;
+          sleep 300;
+        done
+      "
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - SPARK_VERSION=3.5.0
+    container_name: crypto-dashboard
+    networks: [crypto-net]
+    ports:
+      - "8501:8501"
+    depends_on:
+      - spark-streaming
+      - ml-train
+    environment:
+      OUTPUT_PATH: /data/dwh
+      MODEL_PATH: /model
+      SPARK_MASTER: local[2]
+      PORT: 8501
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - crypto-dwh:/data/dwh
+      - crypto-model:/model
+    command: python dash_app/app.py
