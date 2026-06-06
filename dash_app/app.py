@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -17,6 +18,7 @@ from config.logging_config import setup_logger
 from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
 from viz.utils import sma, bollinger, rsi
 from ws_gateway.client import get_last_update
+from prediction.arima import predict_prices, ARIMA_ORDER
 
 logger = setup_logger("dash_app")
 
@@ -127,6 +129,7 @@ PAGES = {
     "overview": "Overview",
     "technical": "Technical Analysis",
     "comparison": "Comparison",
+    "predictions": "Price Prediction",
     "pipeline": "Pipeline Status",
     "alerts": "Alerts",
 }
@@ -135,6 +138,7 @@ NAV_ICONS = {
     "overview": "bi-graph-up",
     "technical": "bi-bar-chart",
     "comparison": "bi-arrow-left-right",
+    "predictions": "bi-cpu",
     "pipeline": "bi-diagram-3",
     "alerts": "bi-bell",
 }
@@ -298,7 +302,7 @@ def refresh_data(n_intervals, interval):
     global _last_ws_ts
     interval = interval or "1m"
     ws_ts = get_last_update()
-    if n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
+    if n_intervals is not None and n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
         return no_update, no_update
     _last_ws_ts = ws_ts or 0
     return _load_all_data(interval), time.time()
@@ -757,6 +761,91 @@ def make_comparison(gold, silver, sel_coins, data):
     ])
 
 
+def make_predictions(gold, sel_coins, timeframe):
+    if gold.empty:
+        return html.Div(dbc.Alert("No historical data available for predictions.", color="warning"))
+
+    coins = sel_coins if sel_coins else gold["coin_id"].unique().tolist()
+    gold_filtered = gold[gold["coin_id"].isin(coins)].copy()
+
+    forecasts = predict_prices(gold_filtered)
+
+    if not forecasts:
+        return html.Div(dbc.Alert(
+            "Could not generate predictions. Need at least 10 data points per coin.",
+            color="warning",
+        ))
+
+    fig = go.Figure()
+    color_cycle = px.colors.qualitative.Plotly
+    stats = []
+
+    for i, (coin, fcast) in enumerate(forecasts.items()):
+        c = color_cycle[i % len(color_cycle)]
+        hist = gold_filtered[gold_filtered["coin_id"] == coin].sort_values("window_start")
+        fig.add_trace(go.Scatter(
+            x=hist["window_start"], y=hist["avg_price"],
+            mode="lines", name=f"{coin} (actual)",
+            line=dict(color=c, width=1.5),
+        ))
+        fig.add_trace(go.Scatter(
+            x=fcast["window_start"], y=fcast["predicted_price"],
+            mode="lines+markers", name=f"{coin} (forecast)",
+            line=dict(color=c, width=2.5, dash="dash"),
+            marker=dict(size=6, symbol="circle"),
+        ))
+        last_price = hist["avg_price"].iloc[-1]
+        last_pred = fcast["predicted_price"].iloc[-1]
+        change_pct = ((last_pred - last_price) / last_price) * 100
+        stats.append(
+            dbc.Card(dbc.CardBody([
+                html.H6(coin, className="card-title"),
+                html.P(f"Last: ${last_price:.2f}", className="mb-1"),
+                html.P(f"Forecast: ${last_pred:.2f}", className="mb-1"),
+                html.P(
+                    f"Change: {change_pct:+.2f}%",
+                    style={"color": "green" if change_pct >= 0 else "red", "font-weight": "bold"},
+                ),
+            ]), className="mb-2")
+        )
+        stats.append(dbc.Card(dbc.CardBody([
+            html.H6(f"{coin} - Next {len(fcast)} Steps", className="card-title"),
+            html.Table(
+                [html.Tr([html.Th("Step"), html.Th("Timestamp"), html.Th("Price")])] +
+                [
+                    html.Tr([
+                        html.Td(str(j + 1)),
+                        html.Td(str(row["window_start"])),
+                        html.Td(f"${row['predicted_price']:.2f}"),
+                    ])
+                    for j, (_, row) in enumerate(fcast.iterrows())
+                ],
+                className="table table-sm table-dark",
+                style={"font-size": "0.8rem"},
+            ),
+        ]), className="mb-3"))
+
+    fig.update_layout(
+        title="ARIMA Price Forecast",
+        xaxis_title="Time",
+        yaxis_title="Price (USD)",
+        template="plotly_dark",
+        hovermode="x unified",
+        legend=dict(orientation="h", y=-0.2),
+        height=500,
+    )
+
+    return html.Div([
+        html.H3("Price Prediction", className="mb-3"),
+        html.P(
+            f"Using ARIMA{ARIMA_ORDER} model per coin with {len(next(iter(forecasts.values())))}-step forecast.",
+            style={"color": "#aaa"},
+        ),
+        dbc.Row([dbc.Col(card, xs=12, md=4) for card in stats], className="mb-4"),
+        dcc.Graph(figure=fig, className="mb-4"),
+    ])
+
+
 def make_pipeline(gold, silver, coins, data):
     use_gold = not gold.empty
     df = gold if use_gold else silver
@@ -1096,6 +1185,8 @@ def render_page(pathname, data_json, sel_coins, timeframe):
         return make_technical(gold_rs, silver, sel_coins or [], data)
     elif page == "comparison":
         return make_comparison(gold_rs, silver, sel_coins or [], data)
+    elif page == "predictions":
+        return make_predictions(gold_rs, sel_coins or [], timeframe)
     elif page == "pipeline":
         return make_pipeline(gold, silver, coins, data)
     elif page == "alerts":

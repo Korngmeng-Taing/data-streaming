@@ -1,4 +1,4 @@
-.PHONY: help install test lint run-producer run-dash run-dashboard \
+.PHONY: help install test lint run-producer run-dash \
         run-streaming run-ws docker-up docker-down clean
 
 help: ## Show available commands
@@ -18,16 +18,12 @@ lint: ## Check syntax of all Python files
 	python -m py_compile config/logging_config.py
 	python -m py_compile api/crypto_producer.py
 	python -m py_compile api/api_config.py
-	python -m py_compile ml/features.py
-	python -m py_compile ml/model.py
 	python -m py_compile spark/streaming_job.py
 	python -m py_compile spark/bronze_layer.py
 	python -m py_compile spark/silver_layer.py
 	python -m py_compile spark/gold_layer.py
 	python -m py_compile dash_app/app.py
 	python -m py_compile dash_app/alert_store.py
-	python -m py_compile app/main.py
-	python -m py_compile viz/dashboard.py
 	python -m py_compile viz/utils.py
 	python -m py_compile ws_gateway/server.py
 	python -m py_compile ws_gateway/client.py
@@ -37,9 +33,6 @@ run-producer: ## Run the Kafka producer
 
 run-dash: ## Run the Dash dashboard
 	python -m dash_app.app
-
-run-dashboard: ## Run the Streamlit pipeline dashboard
-	streamlit run viz/dashboard.py
 
 run-streaming: ## Run the Spark streaming job
 	python -m spark.streaming_job
