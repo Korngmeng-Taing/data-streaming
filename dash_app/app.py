@@ -383,11 +383,11 @@ def _load_all_data(interval: str) -> str:
     Input("data-timer", "n_intervals"),
     State("timeframe-select", "value"),
 )
-def refresh_data(_, interval):
+def refresh_data(n_intervals, interval):
     global _last_ws_ts
     interval = interval or "1m"
     ws_ts = get_last_update()
-    if ws_ts is not None and ws_ts <= _last_ws_ts:
+    if n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
         return no_update, no_update
     _last_ws_ts = ws_ts or 0
     return _load_all_data(interval), time.time()
@@ -423,6 +423,20 @@ def populate_coin_options(data_json):
 
 @callback(
     Output("coin-select", "value"),
+    Input("coin-select", "options"),
+    State("coin-select", "value"),
+    prevent_initial_call=True,
+)
+def auto_select_coin(options, current_value):
+    if current_value:
+        return no_update
+    for o in options:
+        return [o["value"]]
+    return no_update
+
+
+@callback(
+    Output("coin-select", "value", allow_duplicate=True),
     Input("select-all-btn", "n_clicks"),
     Input("clear-btn", "n_clicks"),
     State("coin-select", "options"),
