@@ -1,6 +1,5 @@
 import os
 import time
-from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -11,35 +10,41 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from config.logging_config import setup_logger
+from viz.utils import sma, bollinger, rsi
+from ws_gateway.client import get_last_update
 
 logger = setup_logger("dashboard")
 
-st.set_page_config(page_title="Crypto Pipeline Dashboard", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Crypto Pipeline Dashboard", layout="wide", page_icon="\U0001F4CA")
 
 OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 GOLD_PATH = f"{OUTPUT_PATH}/gold"
 SILVER_PATH = f"{OUTPUT_PATH}/silver"
 
-
-def spark_session():
-    from pyspark.sql import SparkSession
-    return SparkSession.builder.appName("Dashboard").master("local[*]").getOrCreate()
-
-
 def load_data(path: str) -> pd.DataFrame:
-    spark = spark_session()
     try:
-        df = spark.read.parquet(path).toPandas()
-        return df
+        return pd.read_parquet(path)
     except Exception as e:
         logger.warning(f"Cannot read {path}: {e}")
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=10, show_spinner="Loading pipeline data...")
 def load_pipeline_data() -> dict:
-    gold = load_data(GOLD_PATH)
-    silver = load_data(SILVER_PATH)
+    if "last_ws_ts" not in st.session_state:
+        st.session_state.last_ws_ts = 0.0
+        st.session_state.gold = pd.DataFrame()
+        st.session_state.silver = pd.DataFrame()
+
+    ws_ts = get_last_update()
+    if ws_ts is not None and ws_ts <= st.session_state.last_ws_ts:
+        gold = st.session_state.gold
+        silver = st.session_state.silver
+    else:
+        gold = load_data(GOLD_PATH)
+        silver = load_data(SILVER_PATH)
+        st.session_state.gold = gold
+        st.session_state.silver = silver
+        st.session_state.last_ws_ts = ws_ts or time.time()
     return {"gold": gold, "silver": silver}
 
 
@@ -184,32 +189,6 @@ card_bg = "#1E1E1E" if theme == "Dark" else "#F0F2F6"
 text_color = "#FAFAFA" if theme == "Dark" else "#31333F"
 
 # ─── Helpers ──────────────────────────────────────────────────────────
-
-def sma(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window=window).mean()
-
-
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def bollinger(series: pd.Series, window: int = 20, num_std: int = 2):
-    middle = sma(series, window)
-    std = series.rolling(window=window).std()
-    upper = middle + num_std * std
-    lower = middle - num_std * std
-    return middle, upper, lower
-
-
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
 
 def style_metric(label: str, value: str, delta: Optional[str] = None):
     st.markdown(

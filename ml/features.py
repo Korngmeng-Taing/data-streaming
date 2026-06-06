@@ -1,8 +1,9 @@
 import pandas as pd
 
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values(["coin_id", "window_start"]).reset_index(drop=True)
+def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    if df.empty or "coin_id" not in df.columns:
+        return df.copy(), []
 
     for coin in df["coin_id"].unique():
         mask = df["coin_id"] == coin
@@ -28,8 +29,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         # Price change from previous window
         df.loc[mask, "price_change"] = df.loc[mask, "avg_price"].pct_change()
 
-    df = df.fillna({"price_volatility": 0.0, "avg_change_pct": 0.0}).dropna().reset_index(drop=True)
-
     feature_cols = [
         "avg_volume", "avg_change_pct",
         "price_volatility", "record_count",
@@ -38,5 +37,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         "price_ma_3", "price_ma_6", "price_std_3", "price_std_6",
         "price_change",
     ]
+
+    df = df.fillna({"price_volatility": 0.0, "avg_change_pct": 0.0})
+    df = df.dropna(subset=feature_cols).reset_index(drop=True)
 
     return df[["coin_id", "window_start", "avg_price"] + feature_cols], feature_cols

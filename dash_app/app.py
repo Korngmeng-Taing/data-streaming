@@ -2,7 +2,6 @@ import os
 import json
 import time
 from datetime import datetime
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -10,31 +9,31 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import dash
+from functools import lru_cache
 from dash import dcc, html, Input, Output, State, callback, ctx, no_update
 import dash_bootstrap_components as dbc
+from dash_extensions import WebSocket
 
 from config.logging_config import setup_logger
 from ml.features import build_features
 from ml.model import load_model
 from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
-from dash_app.telegram_notifier import send_telegram
 from dash_app.backtest import backtest
+from viz.utils import sma, bollinger, rsi
+from ws_gateway.client import get_last_update
 
 logger = setup_logger("dash_app")
 
 OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 GOLD_PATH = f"{OUTPUT_PATH}/gold"
 SILVER_PATH = f"{OUTPUT_PATH}/silver"
-MODEL_DIR = os.getenv("MODEL_PATH", "/tmp/crypto-model")
+MODEL_DIR = os.getenv("ML_MODEL_PATH", os.getenv("MODEL_PATH", "/tmp/crypto-model"))
 
 # ─── Parquet cache ────────────────────────────────────────────────────
 
 _parquet_cache: dict[str, tuple[pd.DataFrame, float]] = {}
 CACHE_TTL = 8.0
-
-def spark_session():
-    from pyspark.sql import SparkSession
-    return SparkSession.builder.appName("DashApp").master("local[*]").getOrCreate()
+_last_ws_ts: float = 0.0
 
 
 def load_parquet(path: str) -> pd.DataFrame:
@@ -43,8 +42,7 @@ def load_parquet(path: str) -> pd.DataFrame:
     if cached is not None and (now - cached[1]) < CACHE_TTL:
         return cached[0]
     try:
-        spark = spark_session()
-        df = spark.read.parquet(path).toPandas()
+        df = pd.read_parquet(path)
         _parquet_cache[path] = (df, now)
         return df
     except Exception as e:
@@ -123,25 +121,6 @@ def compute_signal(row, r2):
 
 
 # ─── Technical indicator helpers ──────────────────────────────────────
-
-def sma(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window=window).mean()
-
-
-def bollinger(series: pd.Series, window: int = 20, num_std: int = 2):
-    middle = sma(series, window)
-    std = series.rolling(window=window).std()
-    return middle, middle + num_std * std, middle - num_std * std
-
-
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
 
 
 # ─── Timeframe resampling ─────────────────────────────────────────────
@@ -300,9 +279,11 @@ app.layout = html.Div(
         content,
         dcc.Interval(id="data-timer", interval=10_000),
         dcc.Interval(id="alert-timer", interval=10_000),
+        WebSocket(id="ws", url=f"ws://{os.getenv('WS_GATEWAY_HOST', 'localhost')}:8765"),
         dcc.Store(id="data-store", storage_type="memory"),
         dcc.Store(id="toast-trigger", storage_type="memory", data=json.dumps([])),
         dcc.Store(id="theme-store", storage_type="memory", data="dark"),
+        dcc.Store(id="ws-last-update", storage_type="memory", data=0.0),
         html.Div(id="toast-container"),
         html.Div(id="theme-dummy", style={"display": "none"}),
     ]
@@ -342,13 +323,8 @@ def toggle_theme(val):
 
 # ─── Data Loading Callback ────────────────────────────────────────────
 
-@callback(
-    Output("data-store", "data"),
-    Input("data-timer", "n_intervals"),
-    State("timeframe-select", "value"),
-)
-def refresh_data(_, interval):
-    interval = interval or "1m"
+def _load_all_data(interval: str) -> str:
+    global _last_data_ts
     gold = load_parquet(GOLD_PATH)
     silver = load_parquet(SILVER_PATH)
     model_obj, feature_cols, metrics = load_model_safe(interval)
@@ -401,6 +377,39 @@ def refresh_data(_, interval):
     return json.dumps(result, default=str)
 
 
+@callback(
+    Output("data-store", "data"),
+    Output("ws-last-update", "data"),
+    Input("data-timer", "n_intervals"),
+    State("timeframe-select", "value"),
+)
+def refresh_data(_, interval):
+    global _last_ws_ts
+    interval = interval or "1m"
+    ws_ts = get_last_update()
+    if ws_ts is not None and ws_ts <= _last_ws_ts:
+        return no_update, no_update
+    _last_ws_ts = ws_ts or 0
+    return _load_all_data(interval), time.time()
+
+
+@callback(
+    Output("data-store", "data", allow_duplicate=True),
+    Input("ws", "message"),
+    State("timeframe-select", "value"),
+    prevent_initial_call=True,
+)
+def ws_refresh(msg, interval):
+    global _last_ws_ts
+    if not msg:
+        return no_update
+    ws_ts = get_last_update()
+    if ws_ts is not None and ws_ts <= _last_ws_ts:
+        return no_update
+    _last_ws_ts = ws_ts or 0
+    return _load_all_data(interval or "1m")
+
+
 # ─── Coin Selection Callbacks ─────────────────────────────────────────
 
 @callback(
@@ -430,8 +439,13 @@ def handle_select_all_clear(all_clicks, clear_clicks, options):
 
 # ─── Page Router ─────────────────────────────────────────────────────
 
+@lru_cache(maxsize=4)
+def _parse_store_json(data_json: str) -> dict:
+    return json.loads(data_json) if isinstance(data_json, str) else {}
+
+
 def df_from_store(data_json: str) -> tuple:
-    data = json.loads(data_json) if isinstance(data_json, str) else {}
+    data = _parse_store_json(data_json)
     gold = pd.DataFrame(data.get("gold", []))
     silver = pd.DataFrame(data.get("silver", []))
     preds = pd.DataFrame(data.get("predictions", []))
@@ -591,7 +605,7 @@ def make_overview(gold, silver, preds, sel_coins, metrics, model_loaded, data, t
         ], className="mb-4"),
         html.H5("Recent Data", className="mt-4 mb-2"),
         dbc.Table.from_dataframe(recent.head(20), striped=True, bordered=False,
-                                 dark=True, hover=True, responsive=True, size="sm"),
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
     ])
 
 
@@ -871,7 +885,7 @@ def make_pipeline(gold, silver, preds, coins, metrics, model_loaded, data):
         ], className="mb-4"),
         html.H5("Per-Coin Stats"),
         dbc.Table.from_dataframe(stats_df, striped=True, bordered=False,
-                                 dark=True, hover=True, responsive=True, size="sm"),
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
 
         html.H5("Data Freshness", className="mt-4"),
         dbc.Row([
@@ -1047,7 +1061,7 @@ def update_predictions(coin, data_json):
         html.H5("Prediction History"),
         dbc.Table.from_dataframe(
             display[["window_start", "actual_price", "predicted_price", "direction", "pct_change_pred", "confidence"]],
-            striped=True, bordered=False, dark=True, hover=True, responsive=True, size="sm",
+            striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
         ),
     ])
 
@@ -1188,7 +1202,7 @@ def make_backtest(gold, silver, preds, sel_coins, metrics, model_loaded, data):
         if not trades_df.empty:
             components.append(html.H6("Trades", className="mt-2"))
             components.append(dbc.Table.from_dataframe(
-                trades_df, striped=True, bordered=False, dark=True, hover=True, responsive=True, size="sm",
+                trades_df, striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
             ))
 
     return html.Div(components)
@@ -1267,7 +1281,7 @@ def make_signals(gold, silver, preds, sel_coins, metrics, model_loaded, data):
         signal_card_row,
         html.H5("All Signals"),
         dbc.Table.from_dataframe(signal_df_display, striped=True, bordered=False,
-                                 dark=True, hover=True, responsive=True, size="sm"),
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
         html.H5("Signal History"),
         dcc.Dropdown(
             id="sig-coin-dropdown",
@@ -1411,7 +1425,7 @@ def show_alert_history(_):
         return dbc.Alert("No alerts triggered yet.", color="info")
     hist_df = pd.DataFrame(reversed(history[-50:]))
     return dbc.Table.from_dataframe(
-        hist_df, striped=True, bordered=False, dark=True, hover=True, responsive=True, size="sm",
+        hist_df, striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
     )
 
 
@@ -1479,7 +1493,6 @@ def check_alerts(_, data_json):
             history = load_history()
             history.append(entry)
             save_history(history)
-            send_telegram(f"\u26a0\ufe0f <b>Crypto Alert</b>\n{msg}")
 
     return json.dumps(triggered)
 

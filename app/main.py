@@ -1,7 +1,6 @@
 import os
 import time
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
 import streamlit as st
 import pandas as pd
@@ -12,12 +11,13 @@ from plotly.subplots import make_subplots
 from config.logging_config import setup_logger
 from ml.features import build_features
 from ml.model import load_model
+from ws_gateway.client import get_last_update
 
 logger = setup_logger("app")
 
 st.set_page_config(page_title="Crypto Predictor & Alerts", page_icon="", layout="wide")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "/tmp/crypto-model") + "/model.joblib"
+MODEL_PATH = os.getenv("ML_MODEL_PATH", os.getenv("MODEL_PATH", "/tmp/crypto-model")) + "/model_1m.joblib"
 GOLD_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh") + "/gold"
 SILVER_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh") + "/silver"
 
@@ -41,31 +41,37 @@ if model is None:
 
 # ─── Data Loading ─────────────────────────────────────────────────────
 
-@st.cache_data(ttl=15, show_spinner="Loading data...")
+if "last_ws_ts" not in st.session_state:
+    st.session_state.last_ws_ts = 0.0
+    st.session_state.gold = pd.DataFrame()
+    st.session_state.silver = pd.DataFrame()
+
+
 def load_gold_data():
-    from pyspark.sql import SparkSession
-    spark = SparkSession.builder.appName("PredictApp").master("local[*]").getOrCreate()
     try:
-        pdf = spark.read.parquet(GOLD_PATH).toPandas()
-        return pdf
+        return pd.read_parquet(GOLD_PATH)
     except Exception as e:
         logger.warning(f"Cannot read gold: {e}")
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=15)
 def load_silver_data():
-    from pyspark.sql import SparkSession
-    spark = SparkSession.builder.appName("PredictApp").master("local[*]").getOrCreate()
     try:
-        pdf = spark.read.parquet(SILVER_PATH).toPandas()
-        return pdf
+        return pd.read_parquet(SILVER_PATH)
     except Exception as e:
         return pd.DataFrame()
 
 
-gold = load_gold_data()
-silver = load_silver_data()
+ws_ts = get_last_update()
+if ws_ts is not None and ws_ts <= st.session_state.last_ws_ts:
+    gold = st.session_state.gold
+    silver = st.session_state.silver
+else:
+    gold = load_gold_data()
+    silver = load_silver_data()
+    st.session_state.gold = gold
+    st.session_state.silver = silver
+    st.session_state.last_ws_ts = ws_ts or time.time()
 
 if gold.empty and silver.empty:
     st.warning("No data yet. Pipeline is starting up.")

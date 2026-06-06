@@ -10,6 +10,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 from config.logging_config import setup_logger
+from config.spark_manager import get_spark
 from ml.features import build_features
 
 logger = setup_logger("ml_trainer")
@@ -17,27 +18,12 @@ logger = setup_logger("ml_trainer")
 MIN_FEATURE_ROWS = 100
 
 
-_spark = None
-
-
-def spark_session():
-    global _spark
-    if _spark is None:
-        from pyspark.sql import SparkSession
-        _spark = SparkSession.builder.appName("CryptoML").master("local[*]").getOrCreate()
-    return _spark
-
-
-def read_gold_data(spark, path: str) -> pd.DataFrame:
-    return spark.read.parquet(path).toPandas()
-
-
 def train_for_interval(gold_path: str, model_dir: str, interval: str):
     os.makedirs(model_dir, exist_ok=True)
     interval_model_path = os.path.join(model_dir, f"model_{interval}.joblib")
     logger.info(f"Training model for interval={interval} -> {interval_model_path}")
 
-    pdf = read_gold_data(spark_session(), gold_path)
+    pdf = get_spark("CryptoML").read.parquet(gold_path).toPandas()
 
     TIMEFRAMES = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h"}
     rule = TIMEFRAMES.get(interval, "1min")
@@ -96,10 +82,10 @@ def train_for_interval(gold_path: str, model_dir: str, interval: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gold-path", default=os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh") + "/gold")
-    parser.add_argument("--model-dir", default=os.getenv("MODEL_PATH", "/tmp/crypto-model"))
+    parser.add_argument("--model-dir", default=os.getenv("ML_MODEL_PATH", os.getenv("MODEL_PATH", "/tmp/crypto-model")))
     args = parser.parse_args()
 
-    spark = spark_session()
+    get_spark("CryptoML")
     for interval in ["1m", "5m", "15m", "30m", "1h"]:
         try:
             train_for_interval(args.gold_path, args.model_dir, interval)
