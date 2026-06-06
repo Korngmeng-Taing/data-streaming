@@ -1,11 +1,10 @@
 import numpy as np
-from statsmodels.tsa.arima.model import ARIMA
 import pandas as pd
+from prophet import Prophet
 
-logger = __import__("logging").getLogger("prediction.arima")
+logger = __import__("logging").getLogger("prediction.prophet")
 
 FORECAST_STEPS = 12
-ARIMA_ORDER = (5, 1, 0)
 
 
 def _fallback_forecast(series: pd.Series, steps: int) -> np.ndarray:
@@ -22,7 +21,7 @@ def _fallback_forecast(series: pd.Series, steps: int) -> np.ndarray:
     return np.zeros(steps)
 
 
-def predict_prices(
+def predict_prices_prophet(
     gold: pd.DataFrame,
     steps: int = FORECAST_STEPS,
 ) -> dict[str, pd.DataFrame]:
@@ -59,19 +58,42 @@ def predict_prices(
         if len(series) < 10:
             logger.info(f"Using fallback forecast for {coin} ({len(series)} points)")
             forecast = _fallback_forecast(series, steps)
-        else:
-            try:
-                model = ARIMA(series.values, order=ARIMA_ORDER)
-                fitted = model.fit()
-                forecast = fitted.forecast(steps=steps)
-            except Exception as e:
-                logger.warning(f"ARIMA failed for {coin}, falling back: {e}")
-                forecast = _fallback_forecast(series, steps)
+            result[coin] = pd.DataFrame({
+                "coin_id": coin,
+                "window_start": pred_timestamps,
+                "predicted_price": forecast,
+            })
+            continue
 
-        result[coin] = pd.DataFrame({
-            "coin_id": coin,
-            "window_start": pred_timestamps,
-            "predicted_price": forecast,
-        })
+        prophet_df = coin_df[["window_start", "avg_price"]].rename(
+            columns={"window_start": "ds", "avg_price": "y"}
+        )
+        prophet_df["ds"] = pd.to_datetime(prophet_df["ds"])
+
+        try:
+            model = Prophet(
+                yearly_seasonality=False,
+                weekly_seasonality=True,
+                daily_seasonality=True,
+                changepoint_prior_scale=0.05,
+            )
+            model.fit(prophet_df)
+            future = model.make_future_dataframe(periods=steps, freq=freq)
+            forecast = model.predict(future)
+            pred = forecast.tail(steps)
+
+            result[coin] = pd.DataFrame({
+                "coin_id": coin,
+                "window_start": pred["ds"],
+                "predicted_price": pred["yhat"],
+            })
+        except Exception as e:
+            logger.warning(f"Prophet failed for {coin}, falling back: {e}")
+            forecast = _fallback_forecast(series, steps)
+            result[coin] = pd.DataFrame({
+                "coin_id": coin,
+                "window_start": pred_timestamps,
+                "predicted_price": forecast,
+            })
 
     return result

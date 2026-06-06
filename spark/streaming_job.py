@@ -2,14 +2,17 @@ import os
 import signal
 import sys
 import time
+import threading
 
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession
+from pyspark.sql.streaming import StreamingQuery
 
 from config.logging_config import setup_logger
 from config.spark_config import get_spark_config
 from dwh.schema.bronze_schema import bronze_schema
 from dwh.schema.silver_schema import silver_schema
+from dwh.schema.gold_schema import gold_schema
 from spark.bronze_layer import write_to_bronze
 from spark.gold_layer import agg_and_write
 from spark.silver_layer import clean_and_write
@@ -24,7 +27,8 @@ OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/spark-checkpoints")
 SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
 
-queries = []
+queries: list[StreamingQuery] = []
+_start_barrier = threading.Barrier(3, timeout=120)
 
 
 def signal_handler(sig, frame):
@@ -62,6 +66,60 @@ def wait_for_kafka(max_retries=30, delay=5):
     return False
 
 
+def _wait_for_path(path: str, max_wait: int = 30):
+    for _ in range(max_wait):
+        if os.path.exists(path) and any(os.scandir(path)):
+            return True
+        time.sleep(1)
+    return False
+
+
+def start_bronze(spark: SparkSession) -> StreamingQuery:
+    df = (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", TOPIC)
+        .option("startingOffsets", "latest")
+        .option("failOnDataLoss", "false")
+        .load()
+    )
+    q = write_to_bronze(df, CHECKPOINT_DIR, OUTPUT_PATH)
+    queries.append(q)
+    logger.info("Bronze stream started")
+    return q
+
+
+def start_silver(spark: SparkSession) -> StreamingQuery:
+    bronze_path = f"{OUTPUT_PATH}/bronze"
+    if not _wait_for_path(bronze_path):
+        logger.warning("Bronze data not found, silver may start with no initial data")
+    bronze_stream = (
+        spark.readStream
+        .schema(bronze_schema)
+        .parquet(bronze_path)
+    )
+    q = clean_and_write(bronze_stream, OUTPUT_PATH, CHECKPOINT_DIR)
+    queries.append(q)
+    logger.info("Silver stream started")
+    return q
+
+
+def start_gold(spark: SparkSession) -> StreamingQuery:
+    silver_path = f"{OUTPUT_PATH}/silver"
+    if not _wait_for_path(silver_path):
+        logger.warning("Silver data not found, gold may start with no initial data")
+    silver_stream = (
+        spark.readStream
+        .schema(silver_schema)
+        .parquet(silver_path)
+    )
+    q = agg_and_write(silver_stream, OUTPUT_PATH, CHECKPOINT_DIR)
+    queries.append(q)
+    logger.info("Gold stream started")
+    return q
+
+
 def main():
     if not wait_for_kafka():
         sys.exit(1)
@@ -81,44 +139,12 @@ def main():
 
     logger.info(f"Connecting to Kafka: {KAFKA_BOOTSTRAP}, topic: {TOPIC}")
 
-    df = (
-        spark.readStream
-        .format("kafka")
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
-        .option("subscribe", TOPIC)
-        .option("startingOffsets", "latest")
-        .option("failOnDataLoss", "false")
-        .load()
-    )
-
-    bronze_query = write_to_bronze(df, CHECKPOINT_DIR, OUTPUT_PATH)
-    queries.append(bronze_query)
-
-    logger.info("Starting bronze stream...")
-    time.sleep(5)
-
-    logger.info("Starting silver stream (reading from bronze)...")
-    bronze_stream = (
-        spark.readStream
-        .schema(bronze_schema)
-        .parquet(f"{OUTPUT_PATH}/bronze")
-    )
-    silver_query = clean_and_write(bronze_stream, OUTPUT_PATH, CHECKPOINT_DIR)
-    queries.append(silver_query)
-
-    time.sleep(5)
-
-    logger.info("Starting gold stream (reading from silver)...")
-    silver_stream = (
-        spark.readStream
-        .schema(silver_schema)
-        .parquet(f"{OUTPUT_PATH}/silver")
-    )
-    gold_query = agg_and_write(silver_stream, OUTPUT_PATH, CHECKPOINT_DIR)
-    queries.append(gold_query)
+    bronze_q = start_bronze(spark)
+    silver_q = start_silver(spark)
+    gold_q = start_gold(spark)
 
     logger.info("All streaming queries started. Waiting for termination...")
-    bronze_query.awaitTermination()
+    bronze_q.awaitTermination()
 
 
 if __name__ == "__main__":
