@@ -119,40 +119,6 @@ services:
     restart: unless-stopped
     command: python -m spark.streaming_job
 
-  ml-train:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        - SPARK_VERSION=3.5.0
-    container_name: crypto-ml-train
-    networks: [crypto-net]
-    depends_on:
-      spark-streaming:
-        condition: service_started
-    environment:
-      OUTPUT_PATH: /data/dwh
-      ML_MODEL_PATH: /model
-      SPARK_MASTER: local[2]
-    volumes:
-      - crypto-dwh:/data/dwh
-      - crypto-model:/model
-    command: >
-      sh -c "
-        echo 'Waiting for gold data to accumulate...';
-        sleep 60;
-        while true; do
-          if python -m ml.train --gold-path /data/dwh/gold --model-dir /model; then
-            echo 'Training completed. Next retry in 5 min...';
-          else
-            echo 'Training failed. Retrying in 60s...';
-            sleep 60;
-            continue;
-          fi;
-          sleep 300;
-        done
-      "
-
   ws-gateway:
     build:
       context: .
@@ -192,16 +158,13 @@ services:
       - "8501:8501"
     depends_on:
       - spark-streaming
-      - ml-train
       - ws-gateway
     environment:
       OUTPUT_PATH: /data/dwh
-      MODEL_PATH: /model
       PORT: 8501
       WS_GATEWAY_HOST: ws-gateway
     volumes:
       - crypto-dwh:/data/dwh
-      - crypto-model:/model
     healthcheck:
       test: python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501')" || exit 1
       interval: 15s
@@ -216,6 +179,5 @@ networks:
 volumes:
   crypto-dwh:
   crypto-checkpoints:
-  crypto-model:
   kafka-data:
   zookeeper-data:

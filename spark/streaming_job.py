@@ -25,13 +25,10 @@ CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/tmp/spark-checkpoints")
 SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
 
 queries = []
-shutdown = False
 
 
 def signal_handler(sig, frame):
-    global shutdown
     logger.info("Shutdown signal received, stopping streams...")
-    shutdown = True
     for q in queries:
         try:
             q.stop()

@@ -1,5 +1,5 @@
 from pyspark.sql.types import (
-    DecimalType, DoubleType, LongType, StringType, StructField, StructType, TimestampType,
+    DoubleType, LongType, StringType, StructField, StructType, TimestampType,
 )
 
 bronze_schema = StructType(

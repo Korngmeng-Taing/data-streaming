@@ -2,7 +2,6 @@ import os
 import time
 from typing import Optional
 
-import numpy as np
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -74,17 +73,6 @@ else:
     st.warning("No data yet. Pipeline is starting up — check back in 30 seconds.")
     st.stop()
 
-for c in df.select_dtypes(include=["object"]):
-    if c in (time_col,):
-        df[c] = pd.to_datetime(df[c], errors="coerce")
-
-for c in [value_col, volume_col, change_col] + extra_cols:
-    if c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-df = df.dropna(subset=[value_col])
-df = df.sort_values(time_col)
-
 coins = sorted(df["coin_id"].unique())
 
 # ─── Sidebar ──────────────────────────────────────────────────────────
@@ -124,24 +112,15 @@ elif data_source == "Silver (raw)" and not silver.empty:
     extra_cols = ["market_cap_usd"]
     layer_label = "Silver"
 else:
-    if gold.empty and not silver.empty:
-        df = silver
-        is_silver = True
-        time_col = "fetched_at"
-        value_col = "price_usd"
-        volume_col = "volume_24h_usd"
-        change_col = "change_24h_pct"
-        extra_cols = ["market_cap_usd"]
-        layer_label = "Silver"
+    fallback_is_silver = gold.empty and not silver.empty
+    df = silver if fallback_is_silver else gold
+    is_silver = fallback_is_silver
+    if is_silver:
+        time_col = "fetched_at"; value_col = "price_usd"; volume_col = "volume_24h_usd"; change_col = "change_24h_pct"
+        extra_cols = ["market_cap_usd"]; layer_label = "Silver"
     else:
-        df = gold
-        is_silver = False
-        time_col = "window_start"
-        value_col = "avg_price"
-        volume_col = "avg_volume"
-        change_col = "avg_change_pct"
-        extra_cols = ["min_price", "max_price", "price_volatility", "record_count"]
-        layer_label = "Gold"
+        time_col = "window_start"; value_col = "avg_price"; volume_col = "avg_volume"; change_col = "avg_change_pct"
+        extra_cols = ["min_price", "max_price", "price_volatility", "record_count"]; layer_label = "Gold"
 
 for c in df.select_dtypes(include=["object"]):
     if c in (time_col,):
@@ -168,7 +147,6 @@ if not selected_coins:
 
 coin_filter = df[df["coin_id"].isin(selected_coins)]
 now = df[time_col].max()
-window_default = min(60, int(len(coin_filter) * 0.8)) if len(coin_filter) > 1 else 60
 time_range = st.sidebar.selectbox(
     "Time range",
     ["All", "Last 10 points", "Last 25 points", "Last 50 points", "Last 100 points"],

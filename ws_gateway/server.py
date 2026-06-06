@@ -21,11 +21,10 @@ WS_PORT = int(os.getenv("WS_PORT", "8765"))
 
 CLIENTS: set[websockets.WebSocketServerProtocol] = set()
 last_update: float = 0.0
-last_message: dict | None = None
 
 
 async def kafka_worker():
-    global last_update, last_message
+    global last_update
     consumer = aiokafka.AIOKafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP,
@@ -41,7 +40,6 @@ async def kafka_worker():
             record = msg.value
             record["_timestamp"] = time.time()
             payload = json.dumps(record)
-            last_message = record
             last_update = time.time()
             if CLIENTS:
                 await asyncio.gather(

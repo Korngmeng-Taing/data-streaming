@@ -133,18 +133,15 @@ def produce():
     )
 
     consecutive_failures = 0
-    base_sleep = 60  # Increased from 15s to 60s to respect rate limits
-    max_sleep = 600  # Increased max backoff to 10 minutes
-    jitter = True
+    base_sleep = 60
+    max_sleep = 600
 
     while True:
         records = fetch_prices()
         if not records:
             consecutive_failures += 1
-            # More aggressive backoff: 60s, 120s, 240s, 480s... up to 600s
             sleep_time = min(base_sleep * (2 ** (consecutive_failures - 1)), max_sleep)
-            # Add jitter to avoid thundering herd
-            jitter_sleep = sleep_time + random.uniform(0, sleep_time * 0.1) if jitter else sleep_time
+            jitter_sleep = sleep_time + random.uniform(0, sleep_time * 0.1)
             logger.warning(
                 f"No records (failure #{consecutive_failures}), "
                 f"backing off {jitter_sleep:.1f}s..."

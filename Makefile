@@ -1,5 +1,5 @@
 .PHONY: help install test lint run-producer run-dash run-dashboard \
-        run-streaming run-ml run-ws docker-up docker-down clean
+        run-streaming run-ws docker-up docker-down clean
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -20,15 +20,12 @@ lint: ## Check syntax of all Python files
 	python -m py_compile api/api_config.py
 	python -m py_compile ml/features.py
 	python -m py_compile ml/model.py
-	python -m py_compile ml/train.py
-	python -m py_compile ml/predict.py
 	python -m py_compile spark/streaming_job.py
 	python -m py_compile spark/bronze_layer.py
 	python -m py_compile spark/silver_layer.py
 	python -m py_compile spark/gold_layer.py
 	python -m py_compile dash_app/app.py
 	python -m py_compile dash_app/alert_store.py
-	python -m py_compile dash_app/backtest.py
 	python -m py_compile app/main.py
 	python -m py_compile viz/dashboard.py
 	python -m py_compile viz/utils.py
@@ -44,14 +41,8 @@ run-dash: ## Run the Dash dashboard
 run-dashboard: ## Run the Streamlit pipeline dashboard
 	streamlit run viz/dashboard.py
 
-run-predictor: ## Run the Streamlit predictor app
-	streamlit run app/main.py
-
 run-streaming: ## Run the Spark streaming job
 	python -m spark.streaming_job
-
-run-ml: ## Run ML training
-	python -m ml.train
 
 run-ws: ## Run the WebSocket gateway
 	python -m ws_gateway.server

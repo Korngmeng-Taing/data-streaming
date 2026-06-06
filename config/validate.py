@@ -16,13 +16,8 @@ DEPENDENT = {
         "OUTPUT_PATH": "/tmp/crypto-dwh",
         "CHECKPOINT_DIR": "/tmp/spark-checkpoints",
     },
-    "ml-train": {
-        "OUTPUT_PATH": "/tmp/crypto-dwh",
-        "ML_MODEL_PATH": "/tmp/crypto-model",
-    },
     "dashboard": {
         "OUTPUT_PATH": "/tmp/crypto-dwh",
-        "ML_MODEL_PATH": "/tmp/crypto-model",
     },
     "ws-gateway": {
         "KAFKA_BOOTSTRAP_SERVERS": "localhost:9093",

@@ -3,7 +3,6 @@ import json
 import time
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -15,10 +14,7 @@ import dash_bootstrap_components as dbc
 from dash_extensions import WebSocket
 
 from config.logging_config import setup_logger
-from ml.features import build_features
-from ml.model import load_model
 from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
-from dash_app.backtest import backtest
 from viz.utils import sma, bollinger, rsi
 from ws_gateway.client import get_last_update
 
@@ -27,7 +23,6 @@ logger = setup_logger("dash_app")
 OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 GOLD_PATH = f"{OUTPUT_PATH}/gold"
 SILVER_PATH = f"{OUTPUT_PATH}/silver"
-MODEL_DIR = os.getenv("ML_MODEL_PATH", os.getenv("MODEL_PATH", "/tmp/crypto-model"))
 
 # ─── Parquet cache ────────────────────────────────────────────────────
 
@@ -50,20 +45,6 @@ def load_parquet(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_model_safe(interval: str = "1m"):
-    model_path = os.path.join(MODEL_DIR, f"model_{interval}.joblib")
-    try:
-        return load_model(model_path)
-    except FileNotFoundError:
-        pass
-    # fallback to base model
-    fallback = os.path.join(MODEL_DIR, "model.joblib")
-    try:
-        return load_model(fallback)
-    except FileNotFoundError:
-        return None, None, None
-
-
 def prepare_df(df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list[str]) -> pd.DataFrame:
     for c in df.select_dtypes(include=["object"]):
         if c == time_col:
@@ -73,54 +54,6 @@ def prepare_df(df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=[value_col, time_col]).sort_values(time_col)
     return df
-
-
-def compute_predictions(gold_df: pd.DataFrame, model, feature_cols: list[str]) -> pd.DataFrame:
-    if gold_df.empty or model is None:
-        return pd.DataFrame()
-    features_df, _ = build_features(gold_df)
-    if features_df.empty:
-        return pd.DataFrame()
-    available = [c for c in feature_cols if c in features_df.columns]
-    if len(available) < 5:
-        logger.warning(f"Only {len(available)}/{len(feature_cols)} feature cols available")
-        return pd.DataFrame()
-    preds = model.predict(features_df[available])
-    result = features_df[["coin_id", "window_start"]].copy()
-    result["predicted_price"] = preds
-    result["actual_price"] = features_df["avg_price"].values
-    result["direction"] = np.where(
-        result["predicted_price"] > result["actual_price"] * 1.005, "UP",
-        np.where(result["predicted_price"] < result["actual_price"] * 0.995, "DOWN", "STABLE"),
-    )
-    result["pct_change_pred"] = ((result["predicted_price"] - result["actual_price"]) / result["actual_price"] * 100)
-    return result
-
-
-def compute_signal(row, r2):
-    direction = row["direction"]
-    pct_chg = row["pct_change_pred"]
-    conf = row.get("confidence", 50)
-    score = 0
-    if direction == "UP":
-        score = min(100, abs(pct_chg) * 10 + conf * 0.5)
-    elif direction == "DOWN":
-        score = -min(100, abs(pct_chg) * 10 + conf * 0.5)
-    score = score * min(1, (r2 + 0.5) / 0.5) if r2 > 0 else score * 0.5
-    if score > 60:
-        signal, sig_color = "STRONG BUY", "#00E676"
-    elif score > 20:
-        signal, sig_color = "BUY", "#4CAF50"
-    elif score < -60:
-        signal, sig_color = "STRONG SELL", "#FF1744"
-    elif score < -20:
-        signal, sig_color = "SELL", "#F44336"
-    else:
-        signal, sig_color = "HOLD", "#FFC107"
-    return signal, sig_color, round(score, 1)
-
-
-# ─── Technical indicator helpers ──────────────────────────────────────
 
 
 # ─── Timeframe resampling ─────────────────────────────────────────────
@@ -195,10 +128,7 @@ PAGES = {
     "technical": "Technical Analysis",
     "comparison": "Comparison",
     "pipeline": "Pipeline Status",
-    "predictions": "Predictions",
-    "backtest": "Backtest",
     "alerts": "Alerts",
-    "signals": "Signals",
 }
 
 NAV_ICONS = {
@@ -206,10 +136,7 @@ NAV_ICONS = {
     "technical": "bi-bar-chart",
     "comparison": "bi-arrow-left-right",
     "pipeline": "bi-diagram-3",
-    "predictions": "bi-eye",
-    "backtest": "bi-bar-chart-line",
     "alerts": "bi-bell",
-    "signals": "bi-signal",
 }
 
 sidebar = html.Div(
@@ -324,12 +251,8 @@ def toggle_theme(val):
 # ─── Data Loading Callback ────────────────────────────────────────────
 
 def _load_all_data(interval: str) -> str:
-    global _last_data_ts
     gold = load_parquet(GOLD_PATH)
     silver = load_parquet(SILVER_PATH)
-    model_obj, feature_cols, metrics = load_model_safe(interval)
-
-    r2 = metrics.get("r2", 0) if metrics else 0
     result = {}
 
     if not gold.empty:
@@ -342,15 +265,6 @@ def _load_all_data(interval: str) -> str:
         result["gold_chg_col"] = "avg_change_pct"
         result["gold_extra"] = ["min_price", "max_price", "price_volatility", "record_count"]
 
-        preds = compute_predictions(df, model_obj, feature_cols or [])
-        if not preds.empty:
-            conf = max(0, min(100, (r2 * 50 + 50)))
-            preds["confidence"] = conf
-            result["predictions"] = preds.to_dict("records")
-            result["pred_time_col"] = "window_start"
-        else:
-            result["predictions"] = []
-
     if not silver.empty:
         df = prepare_df(silver, "fetched_at", "price_usd",
                         ["volume_24h_usd", "change_24h_pct", "market_cap_usd"])
@@ -360,9 +274,6 @@ def _load_all_data(interval: str) -> str:
         result["silver_vol_col"] = "volume_24h_usd"
         result["silver_chg_col"] = "change_24h_pct"
         result["silver_extra"] = ["market_cap_usd"]
-
-    result["metrics"] = metrics or {}
-    result["model_loaded"] = model_obj is not None
 
     coins = set()
     for key in ["gold", "silver"]:
@@ -417,7 +328,7 @@ def ws_refresh(msg, interval):
     Input("data-store", "data"),
 )
 def populate_coin_options(data_json):
-    _, _, _, coins, _, _, _ = df_from_store(data_json)
+    _, _, coins, _ = df_from_store(data_json)
     return [{"label": c.upper(), "value": c} for c in coins]
 
 
@@ -462,14 +373,11 @@ def df_from_store(data_json: str) -> tuple:
     data = _parse_store_json(data_json)
     gold = pd.DataFrame(data.get("gold", []))
     silver = pd.DataFrame(data.get("silver", []))
-    preds = pd.DataFrame(data.get("predictions", []))
     coins = data.get("coins", [])
-    metrics = data.get("metrics", {})
-    model_loaded = data.get("model_loaded", False)
-    return gold, silver, preds, coins, metrics, model_loaded, data
+    return gold, silver, coins, data
 
 
-def make_overview(gold, silver, preds, sel_coins, metrics, model_loaded, data, timeframe="1m"):
+def make_overview(gold, silver, sel_coins, data, timeframe="1m"):
     use_gold = not gold.empty
     if use_gold:
         df = gold; tc = "window_start"; vc = "avg_price"
@@ -623,7 +531,7 @@ def make_overview(gold, silver, preds, sel_coins, metrics, model_loaded, data, t
     ])
 
 
-def make_technical(gold, silver, preds, sel_coins, metrics, model_loaded, data):
+def make_technical(gold, silver, sel_coins, data):
     if gold.empty and silver.empty:
         return html.Div(dbc.Alert("No data available.", color="warning"))
     return html.Div([
@@ -649,7 +557,7 @@ def make_technical(gold, silver, preds, sel_coins, metrics, model_loaded, data):
 def update_technical(coin, data_json, timeframe):
     if not coin:
         return no_update
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
+    gold, silver, coins, data = df_from_store(data_json)
     use_gold = not gold.empty
     if use_gold:
         try:
@@ -751,7 +659,7 @@ def update_technical(coin, data_json, timeframe):
     return html.Div([cards, dcc.Graph(figure=fig)])
 
 
-def make_comparison(gold, silver, preds, sel_coins, metrics, model_loaded, data):
+def make_comparison(gold, silver, sel_coins, data):
     use_gold = not gold.empty
     df = gold if use_gold else silver
     if df.empty:
@@ -849,7 +757,7 @@ def make_comparison(gold, silver, preds, sel_coins, metrics, model_loaded, data)
     ])
 
 
-def make_pipeline(gold, silver, preds, coins, metrics, model_loaded, data):
+def make_pipeline(gold, silver, coins, data):
     use_gold = not gold.empty
     df = gold if use_gold else silver
     tc = "window_start" if use_gold else "fetched_at"
@@ -911,176 +819,11 @@ def make_pipeline(gold, silver, preds, coins, metrics, model_loaded, data):
                 html.P(["Newest: ", html.Br(), str(now_val) if not df.empty else "N/A"],
                        className="mb-0"),
             ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.P(["Model R²: ", html.Br(), f"{metrics.get('r2', 'N/A')}"],
-                       className="mb-0"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.P(["Model MAE: ", html.Br(), f"${metrics.get('mae', 0):.2f}"],
-                       className="mb-0"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
         ]),
     ])
 
 
-def make_predictions(gold, silver, preds, sel_coins, metrics, model_loaded, data):
-    if preds.empty:
-        return html.Div(dbc.Alert("No predictions available. The model needs more data.", color="info"))
-    use_gold = not gold.empty
-    df = gold if use_gold else silver
-    tc = "window_start" if use_gold else "fetched_at"
-    vc = "avg_price" if use_gold else "price_usd"
-
-    coin = sel_coins[0] if sel_coins else preds["coin_id"].iloc[0]
-
-    return html.Div([
-        html.H3("Price Prediction"),
-        dcc.Dropdown(
-            id="pred-coin-dropdown",
-            options=[{"label": c.upper(), "value": c} for c in sorted(preds["coin_id"].unique())],
-            value=coin, clearable=False,
-            className="mb-3", style={"color": "#000"},
-        ),
-        html.Div(id="pred-content"),
-    ])
-
-
-@callback(
-    Output("pred-content", "children"),
-    Input("pred-coin-dropdown", "value"),
-    Input("data-store", "data"),
-)
-def update_predictions(coin, data_json):
-    if not coin:
-        return no_update
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
-    if preds.empty:
-        return dbc.Alert("No predictions yet.", color="info")
-
-    r2 = metrics.get("r2", 0)
-    cp = preds[preds["coin_id"] == coin].sort_values("window_start")
-    if cp.empty:
-        return dbc.Alert("No predictions for this coin.", color="info")
-
-    latest = cp.iloc[-1]
-    direction = latest["direction"]
-    pred_price = latest["predicted_price"]
-    actual_price = latest["actual_price"]
-    pct_chg = latest["pct_change_pred"]
-    conf = latest["confidence"]
-
-    if direction == "UP":
-        arrow, color = "\u2191", "#4CAF50"
-    elif direction == "DOWN":
-        arrow, color = "\u2193", "#F44336"
-    else:
-        arrow, color = "\u2192", "#FFC107"
-
-    sig, sig_col, score = compute_signal(latest, r2)
-
-    # Direction card
-    card = dbc.Card([
-        dbc.CardBody([
-            html.H2(arrow, style={"font-size": "3rem", "color": color}, className="text-center"),
-            html.H3(direction, className="text-center", style={"color": color, "font-weight": "800"}),
-            dbc.Row([
-                dbc.Col(html.Div([
-                    html.Small("Current", className="text-muted d-block"),
-                    html.H4(f"${actual_price:.4f}"),
-                ]), xs=4, className="text-center"),
-                dbc.Col(html.Div([
-                    html.Small("", className="d-block", style={"font-size": "2rem"}),
-                    html.H4("\u2192"),
-                ]), xs=4, className="text-center"),
-                dbc.Col(html.Div([
-                    html.Small("Predicted", className="text-muted d-block"),
-                    html.H4(f"${pred_price:.4f}"),
-                ]), xs=4, className="text-center"),
-            ], className="mt-2"),
-            html.H5(f"{pct_chg:+.2f}%", className="text-center", style={"color": color}),
-        ])
-    ], color="dark", inverse=True, className="mb-3")
-
-    # Metrics cards
-    cards = dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Confidence", className="text-muted"),
-            html.H4(f"{conf:.0f}%", style={"color": color}),
-        ]), color="dark", inverse=True), xs=6, sm=3),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Signal", className="text-muted"),
-            html.H4(sig, style={"color": sig_col}),
-        ]), color="dark", inverse=True), xs=6, sm=3),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Score", className="text-muted"),
-            html.H4(f"{score}", style={"color": sig_col}),
-        ]), color="dark", inverse=True), xs=6, sm=3),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6("Model R²", className="text-muted"),
-            html.H4(f"{r2:.3f}"),
-        ]), color="dark", inverse=True), xs=6, sm=3),
-    ], className="mb-3")
-
-    # Chart
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=cp["window_start"], y=cp["actual_price"],
-        mode="lines+markers", name="Actual",
-        line=dict(color="#00BCD4", width=2.5),
-    ))
-    fig.add_trace(go.Scatter(
-        x=cp["window_start"], y=cp["predicted_price"],
-        mode="lines+markers", name="Predicted",
-        line=dict(color="#FF9800", width=2.5, dash="dot"),
-    ))
-    dir_colors = {"UP": "#4CAF50", "DOWN": "#F44336", "STABLE": "#FFC107"}
-    fig.add_trace(go.Scatter(
-        x=cp["window_start"], y=cp["predicted_price"],
-        mode="markers",
-        marker=dict(size=8, color=[dir_colors.get(d, "#888") for d in cp["direction"]],
-                    symbol=["triangle-up" if d == "UP" else "triangle-down" if d == "DOWN" else "circle"
-                            for d in cp["direction"]]),
-        name="Direction",
-        hovertemplate="%{text}<extra></extra>",
-        text=[f"{d} ({c:+.1f}%)" for d, c in zip(cp["direction"], cp["pct_change_pred"])],
-    ))
-    fig.update_layout(
-        title=f"{coin.upper()} \u2014 Actual vs Predicted",
-        template="plotly_dark", hovermode="x unified", height=400,
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
-    )
-
-    # Direction breakdown
-    dir_counts = cp["direction"].value_counts()
-    dir_cards = dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H3(f"{dir_counts.get(d, 0) / len(cp) * 100:.0f}%", style={"color": dc}),
-            html.Small(f"{d} ({dir_counts.get(d, 0)})", className="text-muted"),
-        ]), color="dark", inverse=True), xs=4)
-        for d, dc in [("UP", "#4CAF50"), ("DOWN", "#F44336"), ("STABLE", "#FFC107")]
-    ], className="mb-3")
-
-    # Table
-    display = cp.sort_values("window_start", ascending=False).head(20).copy()
-    display["window_start"] = display["window_start"].astype(str)
-    display["pct_change_pred"] = display["pct_change_pred"].round(2).apply(lambda x: f"{x:+.2f}%")
-    display["actual_price"] = display["actual_price"].round(4).apply(lambda x: f"${x:.4f}")
-    display["predicted_price"] = display["predicted_price"].round(4).apply(lambda x: f"${x:.4f}")
-    display["confidence"] = display["confidence"].round(0).apply(lambda x: f"{x:.0f}%")
-
-    return html.Div([
-        card, cards, dcc.Graph(figure=fig), dir_cards,
-        html.H5("Prediction History"),
-        dbc.Table.from_dataframe(
-            display[["window_start", "actual_price", "predicted_price", "direction", "pct_change_pred", "confidence"]],
-            striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
-        ),
-    ])
-
-
-def make_alerts(gold, silver, preds, sel_coins, metrics, model_loaded, data):
+def make_alerts(gold, silver, sel_coins, data):
     use_gold = not gold.empty
     df = gold if use_gold else silver
     vc = "avg_price" if use_gold else "price_usd"
@@ -1099,7 +842,6 @@ def make_alerts(gold, silver, preds, sel_coins, metrics, model_loaded, data):
                     dcc.Dropdown(id="alert-type", options=[
                         {"label": "Price threshold", "value": "price"},
                         {"label": "24h Change %", "value": "change_24h"},
-                        {"label": "Predicted Direction", "value": "direction"},
                     ], value="price", style={"color": "#000"}),
                     html.Div(id="alert-config"),
                     dbc.Button("Add Alert", id="add-alert-btn", color="primary", className="mt-3", n_clicks=0),
@@ -1115,198 +857,6 @@ def make_alerts(gold, silver, preds, sel_coins, metrics, model_loaded, data):
     ])
 
 
-def make_backtest(gold, silver, preds, sel_coins, metrics, model_loaded, data):
-    if preds.empty:
-        return html.Div(dbc.Alert("No predictions yet. Wait for model training.", color="info"))
-    if sel_coins:
-        coin_preds = preds[preds["coin_id"].isin(sel_coins)]
-    else:
-        coin_preds = preds
-    if coin_preds.empty:
-        return html.Div(dbc.Alert("No data for selected coins.", color="info"))
-
-    result = backtest(coin_preds)
-    if "error" in result:
-        return html.Div(dbc.Alert(result["error"], color="warning"))
-
-    components = [html.H3("Backtesting Engine", className="mb-3"),
-                  html.Small("Strategy: position = last predicted direction; return = position * actual pct_change",
-                             className="text-muted d-block mb-3")]
-
-    for entry in result["results"]:
-        coin = entry["coin"]
-        stats = entry["stats"]
-        trades = entry["trades"]
-        curve = entry["curve"]
-
-        # Stats cards
-        stat_cards = dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Total Return", className="text-muted"),
-                html.H4(f"{stats['total_return_pct']:+.2f}%", style={"color": "#4CAF50" if stats['total_return_pct'] >= 0 else "#F44336"}),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Buy & Hold", className="text-muted"),
-                html.H4(f"{stats['buy_hold_return_pct']:+.2f}%"),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Win Rate", className="text-muted"),
-                html.H4(f"{stats['win_rate_pct']:.0f}%", style={"color": "#4CAF50"}),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Max DD", className="text-muted"),
-                html.H4(f"{stats['max_drawdown_pct']:.1f}%", style={"color": "#F44336"}),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Sharpe", className="text-muted"),
-                html.H4(f"{stats['sharpe_ratio']:.2f}", style={"color": "#FF9800"}),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Trades", className="text-muted"),
-                html.H4(str(stats['num_trades'])),
-            ]), color="dark", inverse=True), xs=6, sm=2),
-        ], className="mb-3")
-
-        # Equity curve
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=curve["window_start"], y=curve["cum_strategy"],
-            mode="lines", name="Strategy", line=dict(color="#00BCD4", width=2.5),
-        ))
-        fig.add_trace(go.Scatter(
-            x=curve["window_start"], y=curve["buy_hold"],
-            mode="lines", name="Buy & Hold", line=dict(color="#888", width=1.5, dash="dash"),
-        ))
-
-        # Trade markers
-        if trades:
-            trade_times = []
-            trade_returns = []
-            trade_colors = []
-            for t in trades:
-                trade_times.append(t["entry_time"])
-                trade_returns.append(1.0)
-                trade_colors.append("#4CAF50" if t["pnl_pct"] > 0 else "#F44336")
-            fig.add_trace(go.Scatter(
-                x=trade_times, y=trade_returns, mode="markers",
-                marker=dict(size=10, color=trade_colors, symbol="triangle-up"),
-                name="Trades",
-                hovertemplate="%{text}",
-                text=[f"{t['direction']} PnL: {t['pnl_pct']:+.2f}%" for t in trades],
-            ))
-
-        fig.update_layout(
-            title=f"{coin.upper()} Equity Curve",
-            template="plotly_dark", hovermode="x unified", height=350,
-            margin=dict(l=20, r=20, t=40, b=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
-            yaxis_title="Cumulative Return",
-        )
-
-        # Trade table
-        trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(columns=["entry_time", "exit_time", "direction", "entry_price", "exit_price", "pnl_pct"])
-        if not trades_df.empty:
-            trades_df["pnl_pct"] = trades_df["pnl_pct"].apply(lambda x: f"{x:+.2f}%")
-
-        components.append(html.H5(f"{coin.upper()}", className="mt-3"))
-        components.append(stat_cards)
-        components.append(dcc.Graph(figure=fig))
-
-        if not trades_df.empty:
-            components.append(html.H6("Trades", className="mt-2"))
-            components.append(dbc.Table.from_dataframe(
-                trades_df, striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
-            ))
-
-    return html.Div(components)
-
-
-def make_signals(gold, silver, preds, sel_coins, metrics, model_loaded, data):
-    if preds.empty:
-        return html.Div(dbc.Alert("No prediction data available yet.", color="info"))
-
-    r2 = metrics.get("r2", 0)
-    latest_per = preds.sort_values("window_start").groupby("coin_id").last().reset_index()
-
-    rows = []
-    for _, row in latest_per.iterrows():
-        sig, sig_color, score = compute_signal(row, r2)
-        rows.append({
-            "coin": row["coin_id"].upper(),
-            "signal": sig,
-            "score": score,
-            "direction": row["direction"],
-            "actual": f"${row['actual_price']:.2f}",
-            "predicted": f"${row['predicted_price']:.2f}",
-            "change": f"{row['pct_change_pred']:+.2f}%",
-            "color": sig_color,
-        })
-
-    signal_df = pd.DataFrame(rows).sort_values("score", ascending=False)
-
-    cards = []
-    for _, r in signal_df.iterrows():
-        cards.append(dbc.Col(
-            dbc.Card(dbc.CardBody([
-                html.H5(r["coin"], className="card-title"),
-                html.H3(r["signal"], style={"color": r["color"], "font-weight": "800"}),
-                html.P(f"Score: {r['score']}", className="mb-1"),
-                html.Small(f"{r['actual']} \u2192 {r['predicted']} ({r['change']})", className="text-muted"),
-            ]), color="dark", inverse=True),
-            xs=6, sm=6, md=3,
-        ))
-    signal_card_row = dbc.Row(cards, className="mb-4")
-
-    # Table
-    signal_df_display = signal_df[["coin", "signal", "score", "direction", "actual", "predicted", "change"]]
-
-    # Signal history chart
-    sel_coin = sel_coins[0] if sel_coins else preds["coin_id"].iloc[0]
-    cp = preds[preds["coin_id"] == sel_coin].sort_values("window_start").copy()
-    if len(cp) >= 3:
-        cp["signal_score"] = cp.apply(
-            lambda r: min(100, abs(r["pct_change_pred"]) * 10 + r["confidence"] * 0.5)
-            if r["direction"] == "UP" else -min(100, abs(r["pct_change_pred"]) * 10 + r["confidence"] * 0.5),
-            axis=1,
-        )
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(x=cp["window_start"], y=cp["actual_price"], mode="lines",
-                                 name="Price", line=dict(color="#00BCD4", width=2)), secondary_y=False)
-        fig.add_trace(go.Scatter(x=cp["window_start"], y=cp["signal_score"], mode="lines+markers",
-                                 name="Signal Score", line=dict(color="#FF9800", width=2),
-                                 fill="tozeroy", fillcolor="rgba(255,152,0,0.1)"), secondary_y=True)
-        fig.add_hline(y=20, line_width=1, line_dash="dash", line_color="#4CAF50", secondary_y=True)
-        fig.add_hline(y=-20, line_width=1, line_dash="dash", line_color="#F44336", secondary_y=True)
-        fig.update_layout(
-            template="plotly_dark", hovermode="x unified", height=350,
-            margin=dict(l=20, r=20, t=20, b=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
-        )
-        fig.update_yaxes(title_text="Price (USD)", secondary_y=False)
-        fig.update_yaxes(title_text="Signal Score", secondary_y=True, range=[-100, 100])
-        signal_chart = dcc.Graph(figure=fig)
-    else:
-        signal_chart = html.Div()
-
-    return html.Div([
-        html.H3("Trading Signals"),
-        signal_card_row,
-        html.H5("All Signals"),
-        dbc.Table.from_dataframe(signal_df_display, striped=True, bordered=False,
-                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
-        html.H5("Signal History"),
-        dcc.Dropdown(
-            id="sig-coin-dropdown",
-            options=[{"label": c.upper(), "value": c} for c in sorted(preds["coin_id"].unique())],
-            value=sel_coin, clearable=False,
-            className="mb-2", style={"color": "#000"},
-        ),
-        html.Div(id="sig-chart-container", children=signal_chart),
-    ])
-
-
 # ─── Alert Management Callbacks ──────────────────────────────────────
 
 @callback(
@@ -1316,7 +866,7 @@ def make_signals(gold, silver, preds, sel_coins, metrics, model_loaded, data):
     Input("data-store", "data"),
 )
 def update_alert_config(alert_type, coin, data_json):
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
+    gold, silver, coins, data = df_from_store(data_json)
     use_gold = not gold.empty
     df = gold if use_gold else silver
     vc = "avg_price" if use_gold else "price_usd"
@@ -1338,7 +888,7 @@ def update_alert_config(alert_type, coin, data_json):
             dcc.Input(id="alert-threshold", type="number", value=round(current_price * 1.1, 2),
                       step=0.01, style={"width": "100%", "color": "#000"}),
         ])
-    elif alert_type == "change_24h":
+    else:
         return html.Div([
             dbc.Label("Condition", className="mt-2"),
             dcc.Dropdown(id="alert-condition", options=[
@@ -1348,15 +898,6 @@ def update_alert_config(alert_type, coin, data_json):
             dbc.Label("Threshold (%)", className="mt-2"),
             dcc.Input(id="alert-threshold", type="number", value=5.0,
                       step=0.5, style={"width": "100%", "color": "#000"}),
-        ])
-    else:
-        return html.Div([
-            dbc.Label("Direction", className="mt-2"),
-            dcc.Dropdown(id="alert-condition", options=[
-                {"label": "UP", "value": "UP"},
-                {"label": "DOWN", "value": "DOWN"},
-            ], value="UP", style={"color": "#000"}),
-            dcc.Input(id="alert-threshold", type="hidden", value=0),
         ])
 
 
@@ -1453,7 +994,7 @@ def show_alert_history(_):
 )
 def check_alerts(_, data_json):
     alerts = load_alerts()
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
+    gold, silver, coins, data = df_from_store(data_json)
 
     use_gold = not gold.empty
     df = gold if use_gold else silver
@@ -1487,13 +1028,6 @@ def check_alerts(_, data_json):
                     fire = True
                 elif condition == "below" and chg_val < threshold:
                     fire = True
-        elif a_type == "direction":
-            if not preds.empty:
-                cp = preds[preds["coin_id"] == coin].sort_values("window_start")
-                if not cp.empty:
-                    dir_val = cp["direction"].iloc[-1]
-                    if dir_val == condition:
-                        fire = True
 
         if fire:
             msg = f"{coin.upper()} {condition} {threshold}"
@@ -1540,7 +1074,7 @@ def show_toasts(triggered_json):
     Input("timeframe-select", "value"),
 )
 def render_page(pathname, data_json, sel_coins, timeframe):
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
+    gold, silver, coins, data = df_from_store(data_json)
 
     # Resample gold data for chart pages
     if not gold.empty:
@@ -1557,21 +1091,15 @@ def render_page(pathname, data_json, sel_coins, timeframe):
         page = "overview"
 
     if page == "overview":
-        return make_overview(gold_rs, silver, preds, sel_coins or [], metrics, model_loaded, data, timeframe)
+        return make_overview(gold_rs, silver, sel_coins or [], data, timeframe)
     elif page == "technical":
-        return make_technical(gold_rs, silver, preds, sel_coins or [], metrics, model_loaded, data)
+        return make_technical(gold_rs, silver, sel_coins or [], data)
     elif page == "comparison":
-        return make_comparison(gold_rs, silver, preds, sel_coins or [], metrics, model_loaded, data)
+        return make_comparison(gold_rs, silver, sel_coins or [], data)
     elif page == "pipeline":
-        return make_pipeline(gold, silver, preds, coins, metrics, model_loaded, data)
-    elif page == "predictions":
-        return make_predictions(gold_rs, silver, preds, sel_coins or [], metrics, model_loaded, data)
-    elif page == "backtest":
-        return make_backtest(gold_rs, silver, preds, sel_coins or [], metrics, model_loaded, data)
+        return make_pipeline(gold, silver, coins, data)
     elif page == "alerts":
-        return make_alerts(gold, silver, preds, sel_coins or [], metrics, model_loaded, data)
-    elif page == "signals":
-        return make_signals(gold, silver, preds, sel_coins or [], metrics, model_loaded, data)
+        return make_alerts(gold, silver, sel_coins or [], data)
 
     return html.Div(dbc.Alert("Page not found", color="danger"))
 
@@ -1583,13 +1111,11 @@ def render_page(pathname, data_json, sel_coins, timeframe):
     Input("data-store", "data"),
 )
 def update_sidebar_stats(data_json):
-    gold, silver, preds, coins, metrics, model_loaded, data = df_from_store(data_json)
+    gold, silver, coins, data = df_from_store(data_json)
     items = [
         html.P([html.Strong("Coins:"), f" {len(coins)}"], className="mb-1"),
         html.P([html.Strong("Gold:"), f" {len(gold)}"], className="mb-1"),
         html.P([html.Strong("Silver:"), f" {len(silver)}"], className="mb-1"),
-        html.P([html.Strong("Model:"), " Loaded" if model_loaded else " Waiting"], className="mb-1",
-               style={"color": "#4CAF50" if model_loaded else "#FF9800"}),
         html.P([html.Strong("Updated:"), f" {data.get('updated_at', '')[:19]}"],
                className="mb-1", style={"font-size": "0.75rem"}),
     ]

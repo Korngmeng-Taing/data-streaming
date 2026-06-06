@@ -5,29 +5,21 @@ ALERTS_PATH = os.getenv("ALERTS_PATH", "/data/dwh/alerts.json")
 HISTORY_PATH = os.getenv("HISTORY_PATH", "/data/dwh/alert_history.json")
 
 
-def load_alerts() -> list:
+def _load_json(path: str) -> list:
     try:
-        with open(ALERTS_PATH) as f:
+        with open(path) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 
-def save_alerts(alerts: list):
-    os.makedirs(os.path.dirname(ALERTS_PATH), exist_ok=True)
-    with open(ALERTS_PATH, "w") as f:
-        json.dump(alerts, f, indent=2)
+def _save_json(data: list, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-def load_history() -> list:
-    try:
-        with open(HISTORY_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def save_history(history: list):
-    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
-    with open(HISTORY_PATH, "w") as f:
-        json.dump(history, f, indent=2)
+load_alerts = lambda: _load_json(ALERTS_PATH)
+save_alerts = lambda alerts: _save_json(alerts, ALERTS_PATH)
+load_history = lambda: _load_json(HISTORY_PATH)
+save_history = lambda history: _save_json(history, HISTORY_PATH)

@@ -1,8 +1,7 @@
 import os
-from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import col, from_json, schema_of_json, to_timestamp, lit, from_unixtime
+from pyspark.sql.functions import col, from_json, schema_of_json, to_timestamp, from_unixtime
 
 from config.logging_config import setup_logger
 
