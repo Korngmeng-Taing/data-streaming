@@ -1,5 +1,5 @@
 import pandas as pd
-import pytest
+
 from dash_app.charts import build_main_price_chart, build_technical_chart
 
 
@@ -8,7 +8,9 @@ class TestCandlestickCharts:
         # Create dummy data where price goes up and down
         data = {
             "coin_id": ["btc", "btc", "btc"],
-            "time": pd.to_datetime(["2026-06-07 00:00:00", "2026-06-07 00:01:00", "2026-06-07 00:02:00"]),
+            "time": pd.to_datetime(
+                ["2026-06-07 00:00:00", "2026-06-07 00:01:00", "2026-06-07 00:02:00"]
+            ),
             "price": [100.0, 105.0, 95.0],
             "max_price": [102.0, 107.0, 98.0],
             "min_price": [98.0, 103.0, 92.0],
@@ -16,15 +18,17 @@ class TestCandlestickCharts:
         df = pd.DataFrame(data)
 
         # Build chart
-        fig = build_main_price_chart(df, ["btc"], "time", "price", chart_type="candlestick")
+        fig = build_main_price_chart(
+            df, ["btc"], "time", "price", chart_type="candlestick"
+        )
 
         # Verify fig has trace
         assert len(fig.data) == 1
         trace = fig.data[0]
-        
+
         # Verify it's a candlestick chart
         assert trace.type == "candlestick"
-        
+
         # Verify shift logic for open/close
         # Expected open: [100.0, 100.0, 105.0]
         # Expected close: [100.0, 105.0, 95.0]
@@ -52,7 +56,9 @@ class TestCandlestickCharts:
         }
         df = pd.DataFrame(data)
 
-        fig = build_technical_chart(df, "btc", "time", "price", "avg_volume", "avg_change_pct")
+        fig = build_technical_chart(
+            df, "btc", "time", "price", "avg_volume", "avg_change_pct"
+        )
 
         # Find the candlestick trace (it should be the first trace)
         candlestick_traces = [t for t in fig.data if t.type == "candlestick"]
@@ -65,7 +71,7 @@ class TestCandlestickCharts:
         assert trace.open[0] == 100.0
         assert trace.open[1] == 100.0
         assert trace.open[2] == 101.0
-        
+
         assert trace.close[0] == 100.0
         assert trace.close[1] == 101.0
         assert trace.close[2] == 102.0
@@ -80,34 +86,39 @@ class TestCandlestickCharts:
 class TestAutoInterpretation:
     def test_get_auto_interpretation_bullish(self):
         from dash_app.pages import _get_auto_interpretation
+
         # Create bullish series (price keeps going up)
         price_series = pd.Series([100.0 + i * 2 for i in range(30)])
-        cdf = pd.DataFrame({
-            "coin_id": ["btc"] * 30,
-            "price": price_series,
-            "max_price": price_series + 1,
-            "min_price": price_series - 1,
-        })
+        cdf = pd.DataFrame(
+            {
+                "coin_id": ["btc"] * 30,
+                "price": price_series,
+                "max_price": price_series + 1,
+                "min_price": price_series - 1,
+            }
+        )
         last_price = price_series.iloc[-1]
-        
+
         card = _get_auto_interpretation(price_series, cdf, last_price)
         assert card is not None
         # Render check: should contain card body and card header
-        assert hasattr(card, 'children')
+        assert hasattr(card, "children")
 
     def test_get_auto_interpretation_bearish(self):
         from dash_app.pages import _get_auto_interpretation
+
         # Create bearish series (price keeps going down)
         price_series = pd.Series([200.0 - i * 2 for i in range(30)])
-        cdf = pd.DataFrame({
-            "coin_id": ["btc"] * 30,
-            "price": price_series,
-            "max_price": price_series + 1,
-            "min_price": price_series - 1,
-        })
+        cdf = pd.DataFrame(
+            {
+                "coin_id": ["btc"] * 30,
+                "price": price_series,
+                "max_price": price_series + 1,
+                "min_price": price_series - 1,
+            }
+        )
         last_price = price_series.iloc[-1]
-        
+
         card = _get_auto_interpretation(price_series, cdf, last_price)
         assert card is not None
-        assert hasattr(card, 'children')
-
+        assert hasattr(card, "children")

@@ -1,8 +1,8 @@
-import os
 import json
+import os
+import threading
 import time
 from datetime import datetime
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -11,31 +11,38 @@ from config.logging_config import setup_logger
 
 logger = setup_logger("dash_app")
 
+# Track when the app started for "this session" filtering (Unix epoch, tz-agnostic)
+APP_START_TIME = time.time()
+
 OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 GOLD_PATH = f"{OUTPUT_PATH}/gold"
 SILVER_PATH = f"{OUTPUT_PATH}/silver"
+SESSIONS_PATH = f"{OUTPUT_PATH}/sessions"
 
 _parquet_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+_cache_lock = threading.Lock()
 CACHE_TTL = 9.0
-_last_ws_ts: float = 0.0
-_last_ws_payload: str | None = None
 
 
 def load_parquet(path: str) -> pd.DataFrame:
     now = time.time()
-    cached = _parquet_cache.get(path)
-    if cached is not None and (now - cached[1]) < CACHE_TTL:
-        return cached[0]
+    with _cache_lock:
+        cached = _parquet_cache.get(path)
+        if cached is not None and (now - cached[1]) < CACHE_TTL:
+            return cached[0]
     try:
         df = pd.read_parquet(path)
-        _parquet_cache[path] = (df, now)
+        with _cache_lock:
+            _parquet_cache[path] = (df, now)
         return df
     except Exception as e:
         logger.warning(f"Cannot read {path}: {e}")
         return pd.DataFrame()
 
 
-def prepare_df(df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list[str]) -> pd.DataFrame:
+def prepare_df(
+    df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list[str]
+) -> pd.DataFrame:
     for c in df.select_dtypes(include=["object"]):
         if c == time_col:
             df[c] = pd.to_datetime(df[c], errors="coerce")
@@ -58,7 +65,14 @@ def resample_df(df: pd.DataFrame, interval: str, time_col: str) -> pd.DataFrame:
     df = df.copy()
     if time_col in df.columns and df[time_col].dtype == object:
         df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    price_cols = ["avg_price", "min_price", "max_price", "avg_volume", "avg_change_pct", "price_volatility"]
+    price_cols = [
+        "avg_price",
+        "min_price",
+        "max_price",
+        "avg_volume",
+        "avg_change_pct",
+        "price_volatility",
+    ]
     for c in price_cols:
         if c in df.columns and df[c].dtype == object:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -77,18 +91,11 @@ def resample_df(df: pd.DataFrame, interval: str, time_col: str) -> pd.DataFrame:
             agg[col] = "mean"
     df = df.set_index(time_col)
     resampled = df.groupby("coin_id").resample(rule).agg(agg)
-    resampled = resampled.dropna(subset=[c for c in resampled.columns if c.startswith("avg_")][:1])
+    resampled = resampled.dropna(
+        subset=[c for c in resampled.columns if c.startswith("avg_")][:1]
+    )
     resampled = resampled.reset_index()
     return resampled
-
-
-def get_last_ws_payload() -> str | None:
-    return _last_ws_payload
-
-
-def set_last_ws_payload(payload: str | None):
-    global _last_ws_payload
-    _last_ws_payload = payload
 
 
 MOCK_COINS = [
@@ -100,38 +107,76 @@ MOCK_COINS = [
 ]
 
 
+def list_session_files() -> list[str]:
+    if not os.path.isdir(SESSIONS_PATH):
+        return []
+    try:
+        return sorted(
+            (f for f in os.listdir(SESSIONS_PATH) if f.endswith(".csv")),
+            reverse=True,
+        )
+    except Exception:
+        return []
+
+
+def load_session_csv(filename: str) -> pd.DataFrame:
+    path = os.path.join(SESSIONS_PATH, filename)
+    try:
+        return pd.read_csv(path)
+    except Exception as e:
+        logger.warning(f"Cannot load session CSV {filename}: {e}")
+        return pd.DataFrame()
+
+
 def _generate_mock_data():
-    now = datetime.now()
-    n_points = 60
-    timestamps = [pd.Timestamp(now) - pd.Timedelta(minutes=i) for i in range(n_points - 1, -1, -1)]
+    now = time.time()
+    span = max(1.0, now - APP_START_TIME)
+    n_points = max(10, min(60, int(span / 60) + 1))
+    if n_points <= 1:
+        timestamps = [pd.Timestamp.fromtimestamp(now, tz="UTC")]
+    else:
+        timestamps = [
+            pd.Timestamp.fromtimestamp(now - span + span * i / (n_points - 1), tz="UTC")
+            for i in range(n_points)
+        ]
     gold_rows = []
     silver_rows = []
     for coin in MOCK_COINS:
         base = coin["base_price"]
         vol = coin["volatility"]
         for i, ts in enumerate(timestamps):
-            price = base + np.sin(i / 10 * np.pi) * vol * 0.3 + np.random.randn() * vol * 0.05
+            price = (
+                base
+                + np.sin(i / 10 * np.pi) * vol * 0.3
+                + np.random.randn() * vol * 0.05
+            )
             change = np.random.randn() * 2
             volume = base * np.random.uniform(50000, 200000)
-            gold_rows.append({
-                "coin_id": coin["id"],
-                "window_start": ts,
-                "avg_price": round(price, 6),
-                "min_price": round(price - vol * 0.02, 6),
-                "max_price": round(price + vol * 0.02, 6),
-                "avg_volume": round(volume, 2),
-                "avg_change_pct": round(change, 4),
-                "price_volatility": round(vol * 0.01, 6),
-                "record_count": np.random.randint(5, 30),
-            })
-            silver_rows.append({
-                "coin_id": coin["id"],
-                "fetched_at": ts,
-                "price_usd": round(price, 6),
-                "volume_24h_usd": round(volume * 24, 2),
-                "change_24h_pct": round(change, 4),
-                "market_cap_usd": round(price * np.random.uniform(1e6, 1e8), 2),
-            })
+            gold_rows.append(
+                {
+                    "coin_id": coin["id"],
+                    "window_start": ts,
+                    "avg_price": round(price, 6),
+                    "min_price": round(price - vol * 0.02, 6),
+                    "max_price": round(price + vol * 0.02, 6),
+                    "avg_volume": round(volume, 2),
+                    "avg_change_pct": round(change, 4),
+                    "price_volatility": round(vol * 0.01, 6),
+                    "record_count": np.random.randint(5, 30),
+                }
+            )
+            silver_rows.append(
+                {
+                    "coin_id": coin["id"],
+                    "fetched_at": ts,
+                    "price_usd": round(price, 6),
+                    "volume_24h_usd": round(volume * 24, 2),
+                    "change_24h_pct": round(change, 4),
+                    "market_cap_usd": round(price * np.random.uniform(1e6, 1e8), 2),
+                    "data_quality_flag": "good",
+                    "last_updated": int(time.time()),
+                }
+            )
     return pd.DataFrame(gold_rows), pd.DataFrame(silver_rows)
 
 
@@ -145,18 +190,38 @@ def _load_all_data(interval: str) -> str:
         gold, silver = _generate_mock_data()
 
     if not gold.empty:
-        df = prepare_df(gold, "window_start", "avg_price",
-                        ["avg_volume", "avg_change_pct", "min_price", "max_price", "price_volatility", "record_count"])
+        df = prepare_df(
+            gold,
+            "window_start",
+            "avg_price",
+            [
+                "avg_volume",
+                "avg_change_pct",
+                "min_price",
+                "max_price",
+                "price_volatility",
+                "record_count",
+            ],
+        )
         result["gold"] = df.to_dict("records") if not df.empty else []
         result["gold_time_col"] = "window_start"
         result["gold_value_col"] = "avg_price"
         result["gold_vol_col"] = "avg_volume"
         result["gold_chg_col"] = "avg_change_pct"
-        result["gold_extra"] = ["min_price", "max_price", "price_volatility", "record_count"]
+        result["gold_extra"] = [
+            "min_price",
+            "max_price",
+            "price_volatility",
+            "record_count",
+        ]
 
     if not silver.empty:
-        df = prepare_df(silver, "fetched_at", "price_usd",
-                        ["volume_24h_usd", "change_24h_pct", "market_cap_usd"])
+        df = prepare_df(
+            silver,
+            "fetched_at",
+            "price_usd",
+            ["volume_24h_usd", "change_24h_pct", "market_cap_usd"],
+        )
         result["silver"] = df.to_dict("records") if not df.empty else []
         result["silver_time_col"] = "fetched_at"
         result["silver_value_col"] = "price_usd"
@@ -177,9 +242,25 @@ def _load_all_data(interval: str) -> str:
     return json.dumps(result, default=str)
 
 
-@lru_cache(maxsize=4)
 def _parse_store_json(data_json: str) -> dict:
     return json.loads(data_json) if isinstance(data_json, str) else {}
+
+
+def save_session_csv():
+    try:
+        gold = load_parquet(GOLD_PATH)
+        silver = load_parquet(SILVER_PATH)
+        df = gold if not gold.empty else silver
+        if df.empty:
+            logger.info("No data to save for session CSV")
+            return
+        os.makedirs(SESSIONS_PATH, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(SESSIONS_PATH, f"session_{timestamp}.csv")
+        df.to_csv(path, index=False)
+        logger.info(f"Session data saved to {path} ({len(df)} rows)")
+    except Exception as e:
+        logger.error(f"Failed to save session CSV: {e}")
 
 
 def df_from_store(data_json: str) -> tuple:

@@ -1,20 +1,21 @@
 import json
+import os
+import random
 import time
 from datetime import datetime, timezone
-import random
-import os
 
 import requests
-from kafka import KafkaProducer
 
-from api.api_config import APIConfig, KafkaConfig
+from api.api_config import APIConfig
 from config.logging_config import setup_logger
 
 logger = setup_logger("crypto_producer")
 
+OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
+RAW_PATH = f"{OUTPUT_PATH}/raw"
+
 
 def generate_mock_prices() -> list[dict]:
-    """Generate mock crypto price data for testing without API calls"""
     mock_data = {
         "bitcoin": {
             "price_range": (35000, 45000),
@@ -39,37 +40,40 @@ def generate_mock_prices() -> list[dict]:
     }
 
     records = []
-    ts = datetime.now(timezone.utc).isoformat()
-    
+    now = datetime.now(timezone.utc)
+    ts_iso = now.isoformat()
+    ts_unix = int(now.timestamp())
+
     for coin_id in APIConfig.coin_ids:
         if coin_id in mock_data:
             config = mock_data[coin_id]
             price = random.uniform(*config["price_range"])
             volume = random.uniform(*config["volume_range"])
             change = random.uniform(-5, 5)
-            
-            records.append({
-                "coin_id": coin_id,
-                "price_usd": round(price, 2),
-                "market_cap_usd": round(price * random.uniform(1e6, 1e8), 0),
-                "volume_24h_usd": round(volume, 0),
-                "change_24h_pct": round(change, 2),
-                "last_updated": ts,
-                "fetched_at": ts,
-            })
-    
+
+            records.append(
+                {
+                    "coin_id": coin_id,
+                    "price_usd": round(price, 2),
+                    "market_cap_usd": round(price * random.uniform(1e6, 1e8), 0),
+                    "volume_24h_usd": round(volume, 0),
+                    "change_24h_pct": round(change, 2),
+                    "last_updated": ts_unix,
+                    "fetched_at": ts_iso,
+                }
+            )
+
     logger.info(f"Generated {len(records)} mock coin prices")
     return records
 
 
 def fetch_prices() -> list[dict]:
-    # Check if mock mode is enabled
     use_mock = os.getenv("USE_MOCK_DATA", "false").lower() == "true"
-    
+
     if use_mock:
         logger.info("Using mock data mode")
         return generate_mock_prices()
-    
+
     url = f"{APIConfig.base_url}/simple/price"
     params = {
         "ids": ",".join(APIConfig.coin_ids),
@@ -90,11 +94,11 @@ def fetch_prices() -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.HTTPError as e:
-        if resp.status_code == 429:
-            logger.warning(f"Rate limited (429). Falling back to mock data...")
+        status = resp.status_code if hasattr(resp, "status_code") else None
+        if status == 429:
+            logger.warning("Rate limited (429). Falling back to mock data...")
             return generate_mock_prices()
-        else:
-            logger.error(f"API fetch failed (HTTP {resp.status_code}): {e}")
+        logger.error(f"API fetch failed (HTTP {status}): {e}")
         return []
     except requests.RequestException as e:
         logger.warning(f"API fetch failed: {e}. Falling back to mock data...")
@@ -119,21 +123,23 @@ def fetch_prices() -> list[dict]:
     return records
 
 
-def produce():
-    producer = KafkaProducer(
-        bootstrap_servers=KafkaConfig.bootstrap_servers,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        acks="all",
-        retries=3,
-    )
+def write_raw(records: list[dict]):
+    if not records:
+        return None
+    os.makedirs(RAW_PATH, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = os.path.join(RAW_PATH, f"prices_{ts}.jsonl")
+    with open(path, "w") as f:
+        for rec in records:
+            f.write(json.dumps(rec) + "\n")
+    return path
 
-    logger.info(
-        f"Starting producer -> {KafkaConfig.bootstrap_servers} "
-        f"topic={KafkaConfig.topic}"
-    )
+
+def produce():
+    logger.info(f"Starting producer -> {RAW_PATH}")
 
     consecutive_failures = 0
-    base_sleep = 60
+    base_sleep = 10
     max_sleep = 600
 
     while True:
@@ -150,23 +156,11 @@ def produce():
             continue
 
         consecutive_failures = 0
-        for rec in records:
-            try:
-                future = producer.send(
-                    KafkaConfig.topic,
-                    key=rec["coin_id"].encode("utf-8"),
-                    value=rec,
-                )
-                future.get(timeout=10)
-                logger.debug(f"Sent record for {rec['coin_id']}")
-            except Exception as e:
-                logger.error(f"Failed to send record: {e}")
+        path = write_raw(records)
 
-        producer.flush()
+        coins = ", ".join([r["coin_id"] for r in records])
         logger.info(
-            f"Produced {len(records)} messages "
-            f"({', '.join([r['coin_id'] for r in records])}), "
-            f"sleeping {base_sleep}s..."
+            f"Wrote {len(records)} records to {path} ({coins}), sleeping {base_sleep}s..."
         )
         time.sleep(base_sleep)
 

@@ -16,7 +16,7 @@ def _fallback_forecast(series: pd.Series, steps: int) -> np.ndarray:
         slope, intercept = np.polyfit(x, y, 1)
         future_x = np.arange(n, n + steps)
         return slope * future_x + intercept
-    elif n == 1:
+    if n == 1:
         return np.full(steps, series.iloc[0])
     return np.zeros(steps)
 
@@ -41,31 +41,31 @@ def predict_prices_prophet(
         last_ts = coin_df["window_start"].iloc[-1]
         if isinstance(last_ts, str):
             last_ts = pd.Timestamp(last_ts)
-        
+
         # Calculate frequency safely
         if len(coin_df) >= 2:
             freq = coin_df["window_start"].diff().median()
         else:
             freq = pd.Timedelta(minutes=1)
-        
+
         if freq is None or pd.isna(freq):
             freq = pd.Timedelta(minutes=1)
 
-        pred_timestamps = [
-            last_ts + (i + 1) * freq for i in range(steps)
-        ]
+        pred_timestamps = [last_ts + (i + 1) * freq for i in range(steps)]
 
         if len(series) < 10:
             logger.info(f"Using fallback forecast for {coin} ({len(series)} points)")
             forecast = _fallback_forecast(series, steps)
-            result[coin] = pd.DataFrame({
-                "coin_id": coin,
-                "window_start": pred_timestamps,
-                "predicted_price": forecast,
-            })
+            result[coin] = pd.DataFrame(
+                {
+                    "coin_id": coin,
+                    "window_start": pred_timestamps,
+                    "predicted_price": forecast,
+                }
+            )
             continue
 
-        prophet_df = coin_df[["window_start", "avg_price"]].rename(
+        prophet_df = coin_df[["window_start", "avg_price", "avg_volume"]].rename(
             columns={"window_start": "ds", "avg_price": "y"}
         )
         prophet_df["ds"] = pd.to_datetime(prophet_df["ds"])
@@ -77,23 +77,36 @@ def predict_prices_prophet(
                 daily_seasonality=True,
                 changepoint_prior_scale=0.05,
             )
+            model.add_regressor("avg_volume")
             model.fit(prophet_df)
+
+            # For future data, we need future volume.
+            # As a simple heuristic, we'll use the last known volume for the forecast period.
             future = model.make_future_dataframe(periods=steps, freq=freq)
+            last_vol = prophet_df["avg_volume"].iloc[-1]
+            future["avg_volume"] = (
+                prophet_df["avg_volume"].tolist() + [last_vol] * steps
+            )
+
             forecast = model.predict(future)
             pred = forecast.tail(steps)
 
-            result[coin] = pd.DataFrame({
-                "coin_id": coin,
-                "window_start": pred["ds"],
-                "predicted_price": pred["yhat"],
-            })
+            result[coin] = pd.DataFrame(
+                {
+                    "coin_id": coin,
+                    "window_start": pred["ds"],
+                    "predicted_price": pred["yhat"],
+                }
+            )
         except Exception as e:
             logger.warning(f"Prophet failed for {coin}, falling back: {e}")
             forecast = _fallback_forecast(series, steps)
-            result[coin] = pd.DataFrame({
-                "coin_id": coin,
-                "window_start": pred_timestamps,
-                "predicted_price": forecast,
-            })
+            result[coin] = pd.DataFrame(
+                {
+                    "coin_id": coin,
+                    "window_start": pred_timestamps,
+                    "predicted_price": forecast,
+                }
+            )
 
     return result

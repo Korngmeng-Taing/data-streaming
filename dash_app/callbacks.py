@@ -2,23 +2,56 @@ import json
 import time
 from datetime import datetime
 
-import pandas as pd
 import dash
-from dash import dcc, html, callback, Input, Output, State, ctx, no_update, clientside_callback
 import dash_bootstrap_components as dbc
+import pandas as pd
+from dash import (
+    Input,
+    Output,
+    State,
+    callback,
+    clientside_callback,
+    ctx,
+    dash_table,
+    dcc,
+    html,
+    no_update,
+)
 
 from config.logging_config import setup_logger
+from dash_app.alert_store import load_alerts, load_history, save_alerts, save_history
 from dash_app.data_utils import (
-    _load_all_data, _last_ws_ts, df_from_store, resample_df,
+    _load_all_data,
+    df_from_store,
+    load_session_csv,
+    resample_df,
 )
 from dash_app.pages import (
-    make_overview, make_predictions, make_pipeline, make_comparison,
-    make_alerts, make_technical, _update_technical_content,
+    _update_technical_content,
+    make_alerts,
+    make_comparison,
+    make_data_explorer,
+    make_overview,
+    make_pipeline,
+    make_predictions,
+    make_technical,
 )
-from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
-from ws_gateway.client import get_last_update
 
 logger = setup_logger("dash_app")
+
+
+# ─── Client Timezone Detection ───────────────────────────────────────
+
+
+clientside_callback(
+    """
+    function(href) {
+        return new Date().getTimezoneOffset();
+    }
+    """,
+    Output("client-tz", "data"),
+    Input("url", "href"),
+)
 
 
 # ─── Theme Toggle ─────────────────────────────────────────────────────
@@ -58,34 +91,10 @@ def toggle_theme(val):
 
 @callback(
     Output("data-store", "data"),
-    Output("ws-last-update", "data"),
     Input("data-timer", "n_intervals"),
     State("timeframe-select", "value"),
 )
 def refresh_data(n_intervals, interval):
-    global _last_ws_ts
-    interval = interval or "1m"
-    ws_ts = get_last_update()
-    if n_intervals is not None and n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
-        return no_update, no_update
-    _last_ws_ts = ws_ts or 0
-    return _load_all_data(interval), time.time()
-
-
-@callback(
-    Output("data-store", "data", allow_duplicate=True),
-    Input("ws", "message"),
-    State("timeframe-select", "value"),
-    prevent_initial_call=True,
-)
-def ws_refresh(msg, interval):
-    global _last_ws_ts
-    if not msg:
-        return no_update
-    ws_ts = get_last_update()
-    if ws_ts is not None and ws_ts <= _last_ws_ts:
-        return no_update
-    _last_ws_ts = ws_ts or 0
     return _load_all_data(interval or "1m")
 
 
@@ -126,7 +135,7 @@ def handle_select_all_clear(all_clicks, clear_clicks, options):
     triggered = ctx.triggered_id
     if triggered == "select-all-btn":
         return [o["value"] for o in options]
-    elif triggered == "clear-btn":
+    if triggered == "clear-btn":
         return []
     return no_update
 
@@ -139,11 +148,14 @@ def handle_select_all_clear(all_clicks, clear_clicks, options):
     Input("ta-coin-dropdown", "value"),
     Input("data-store", "data"),
     Input("timeframe-select", "value"),
+    Input("time-range-select", "value"),
 )
-def update_technical(coin, data_json, timeframe):
+def update_technical(coin, data_json, timeframe, time_range):
     if not coin:
         return no_update
-    content = _update_technical_content(coin, data_json, timeframe, resample_df)
+    content = _update_technical_content(
+        coin, data_json, timeframe, resample_df, time_range=time_range
+    )
     if content is None:
         return dbc.Alert("Not enough data points for technical analysis.", color="info")
     return content
@@ -171,45 +183,85 @@ def update_alert_config(alert_type, coin, data_json):
             current_price = float(cdf[vc].iloc[-1])
 
     if alert_type == "price":
-        return html.Div([
+        return html.Div(
+            [
+                dbc.Label("Condition", className="mt-2"),
+                dcc.Dropdown(
+                    id="alert-condition",
+                    options=[
+                        {"label": "Above", "value": "above"},
+                        {"label": "Below", "value": "below"},
+                    ],
+                    value="above",
+                    style={"color": "#000"},
+                ),
+                dbc.Label("Threshold ($)", className="mt-2"),
+                dcc.Input(
+                    id="alert-threshold",
+                    type="number",
+                    value=round(current_price * 1.1, 2),
+                    step=0.01,
+                    style={"width": "100%", "color": "#000"},
+                ),
+            ]
+        )
+    return html.Div(
+        [
             dbc.Label("Condition", className="mt-2"),
-            dcc.Dropdown(id="alert-condition", options=[
-                {"label": "Above", "value": "above"},
-                {"label": "Below", "value": "below"},
-            ], value="above", style={"color": "#000"}),
-            dbc.Label("Threshold ($)", className="mt-2"),
-            dcc.Input(id="alert-threshold", type="number", value=round(current_price * 1.1, 2),
-                      step=0.01, style={"width": "100%", "color": "#000"}),
-        ])
-    else:
-        return html.Div([
-            dbc.Label("Condition", className="mt-2"),
-            dcc.Dropdown(id="alert-condition", options=[
-                {"label": "Above", "value": "above"},
-                {"label": "Below", "value": "below"},
-            ], value="above", style={"color": "#000"}),
+            dcc.Dropdown(
+                id="alert-condition",
+                options=[
+                    {"label": "Above", "value": "above"},
+                    {"label": "Below", "value": "below"},
+                ],
+                value="above",
+                style={"color": "#000"},
+            ),
             dbc.Label("Threshold (%)", className="mt-2"),
-            dcc.Input(id="alert-threshold", type="number", value=5.0,
-                      step=0.5, style={"width": "100%", "color": "#000"}),
-        ])
+            dcc.Input(
+                id="alert-threshold",
+                type="number",
+                value=5.0,
+                step=0.5,
+                style={"width": "100%", "color": "#000"},
+            ),
+        ]
+    )
 
 
 def _render_active_alerts():
     alerts = load_alerts()
     active = [a for a in alerts if a.get("active")]
     if not active:
-        return dbc.Alert("No active alerts. Create one above.", color="info", className="mt-2")
+        return dbc.Alert(
+            "No active alerts. Create one above.", color="info", className="mt-2"
+        )
     items = []
     for alert in active:
-        items.append(dbc.ListGroupItem([
-            html.Div([
-                html.Strong(f"{alert['coin'].upper()}"),
-                html.Span(f" — {alert['type']} {alert['condition']} {alert['threshold']}", className="ms-1"),
-                dbc.Badge("Active", color="success", className="ms-2"),
-                dbc.Button("Remove", id={"type": "remove-alert", "index": alert["id"]},
-                           size="sm", color="danger", className="ms-auto float-end"),
-            ], style={"display": "flex", "alignItems": "center"}),
-        ]))
+        items.append(
+            dbc.ListGroupItem(
+                [
+                    html.Div(
+                        [
+                            html.Strong(f"{alert['coin'].upper()}"),
+                            html.Span(
+                                f" — {alert['type']} {alert['condition']} {alert['threshold']}",
+                                className="ms-1",
+                            ),
+                            dbc.Badge("Active", color="success", className="ms-2"),
+                            dbc.Button(
+                                "Remove",
+                                id={"type": "remove-alert", "index": alert["id"]},
+                                size="sm",
+                                color="danger",
+                                className="ms-auto float-end",
+                            ),
+                        ],
+                        style={"display": "flex", "alignItems": "center"},
+                    ),
+                ]
+            )
+        )
     return dbc.ListGroup(items, flush=True)
 
 
@@ -234,14 +286,16 @@ def add_alert(n_clicks, coin, alert_type, condition, threshold):
     if not coin or not condition:
         return no_update
     alerts = load_alerts()
-    alerts.append({
-        "id": int(time.time() * 1000),
-        "coin": coin,
-        "type": alert_type,
-        "condition": condition,
-        "threshold": float(threshold) if threshold else 0,
-        "active": True,
-    })
+    alerts.append(
+        {
+            "id": int(time.time() * 1000),
+            "coin": coin,
+            "type": alert_type,
+            "condition": condition,
+            "threshold": float(threshold) if threshold else 0,
+            "active": True,
+        }
+    )
     save_alerts(alerts)
     return _render_active_alerts()
 
@@ -273,7 +327,13 @@ def show_alert_history(_):
         return dbc.Alert("No alerts triggered yet.", color="info")
     hist_df = pd.DataFrame(reversed(history[-50:]))
     return dbc.Table.from_dataframe(
-        hist_df, striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
+        hist_df,
+        striped=True,
+        bordered=False,
+        class_name="table-dark",
+        hover=True,
+        responsive=True,
+        size="sm",
     )
 
 
@@ -311,16 +371,12 @@ def check_alerts(_, data_json):
         fire = False
         if a_type == "price":
             current = float(cdf[vc].iloc[-1])
-            if condition == "above" and current > threshold:
-                fire = True
-            elif condition == "below" and current < threshold:
+            if condition == "above" and current > threshold or condition == "below" and current < threshold:
                 fire = True
         elif a_type == "change_24h":
             if cc in cdf.columns:
                 chg_val = float(cdf[cc].iloc[-1])
-                if condition == "above" and chg_val > threshold:
-                    fire = True
-                elif condition == "below" and chg_val < threshold:
+                if condition == "above" and chg_val > threshold or condition == "below" and chg_val < threshold:
                     fire = True
 
         if fire:
@@ -347,14 +403,16 @@ def show_toasts(triggered_json):
     triggered = json.loads(triggered_json) if triggered_json else []
     toasts = []
     for t in triggered[-3:]:
-        toasts.append(dbc.Toast(
-            t["message"],
-            header=f"{t['coin']} — {t['type']}",
-            icon="warning",
-            duration=5000,
-            style={"position": "fixed", "top": 80, "right": 20, "zIndex": 9999},
-            is_open=True,
-        ))
+        toasts.append(
+            dbc.Toast(
+                t["message"],
+                header=f"{t['coin']} — {t['type']}",
+                icon="warning",
+                duration=5000,
+                style={"position": "fixed", "top": 80, "right": 20, "zIndex": 9999},
+                is_open=True,
+            )
+        )
     return toasts
 
 
@@ -370,8 +428,18 @@ def show_toasts(triggered_json):
     Input("chart-type-select", "value"),
     Input("time-range-select", "value"),
     Input("model-select", "value"),
+    Input("client-tz", "data"),
 )
-def render_page(pathname, data_json, sel_coins, timeframe, chart_type, time_range, model):
+def render_page(
+    pathname,
+    data_json,
+    sel_coins,
+    timeframe,
+    chart_type,
+    time_range,
+    model,
+    client_tz_offset,
+):
     gold, silver, coins, data = df_from_store(data_json)
 
     if not gold.empty:
@@ -383,22 +451,47 @@ def render_page(pathname, data_json, sel_coins, timeframe, chart_type, time_rang
     else:
         gold_rs = gold
 
+    tz_offset = client_tz_offset or 0
+
     page = pathname.strip("/") if pathname else ""
-    if page not in ["overview", "technical", "comparison", "predictions", "pipeline", "alerts"]:
+    if page not in [
+        "overview",
+        "technical",
+        "comparison",
+        "predictions",
+        "data",
+        "pipeline",
+        "alerts",
+    ]:
         page = "overview"
 
+    if not sel_coins and coins:
+        sel_coins = list(coins)
+
     if page == "overview":
-        return make_overview(gold_rs, silver, sel_coins or [], data, timeframe,
-                             chart_type or "line", time_range or "all")
-    elif page == "technical":
+        return make_overview(
+            gold_rs,
+            silver,
+            sel_coins or [],
+            data,
+            timeframe,
+            chart_type or "line",
+            time_range or "all",
+            tz_offset,
+        )
+    if page == "technical":
         return make_technical(gold_rs, silver, sel_coins or [], data)
-    elif page == "comparison":
+    if page == "comparison":
         return make_comparison(gold_rs, silver, sel_coins or [], data)
-    elif page == "predictions":
+    if page == "predictions":
         return make_predictions(gold_rs, sel_coins or [], timeframe, model or "arima")
-    elif page == "pipeline":
+    if page == "data":
+        return make_data_explorer(
+            gold, silver, sel_coins or [], data, time_range or "all", tz_offset
+        )
+    if page == "pipeline":
         return make_pipeline(gold, silver, coins, data)
-    elif page == "alerts":
+    if page == "alerts":
         return make_alerts(gold, silver, sel_coins or [], data)
 
     return html.Div(dbc.Alert("Page not found", color="danger"))
@@ -433,7 +526,44 @@ def export_csv(n_clicks, pathname, data_json, sel_coins, timeframe, time_range):
         return no_update
 
     csv_str = coin_filter.to_csv(index=False)
-    return dcc.send_string(csv_str, f"crypto_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    return dcc.send_string(
+        csv_str, f"crypto_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+
+
+@callback(
+    Output("data-download-csv", "data"),
+    Input("data-export-csv-btn", "n_clicks"),
+    State("data-store", "data"),
+    State("coin-select", "value"),
+    State("time-range-select", "value"),
+    prevent_initial_call=True,
+)
+def export_data_csv(n_clicks, data_json, sel_coins, time_range):
+    if not n_clicks:
+        return no_update
+    gold, silver, coins, data = df_from_store(data_json)
+    use_gold = not gold.empty
+    df = gold if use_gold else silver
+    if df.empty:
+        return no_update
+
+    tc = "window_start" if use_gold else "fetched_at"
+    from dash_app.pages import _filter_time_range
+
+    df = _filter_time_range(df, tc, time_range or "all")
+
+    if sel_coins:
+        df = df[df["coin_id"].isin(sel_coins)]
+
+    if df.empty:
+        return no_update
+
+    suffix = time_range if time_range and time_range != "all" else "full"
+    csv_str = df.to_csv(index=False)
+    return dcc.send_string(
+        csv_str, f"crypto_data_{suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
 
 
 # ─── Sidebar Stats ───────────────────────────────────────────────────
@@ -445,11 +575,70 @@ def export_csv(n_clicks, pathname, data_json, sel_coins, timeframe, time_range):
 )
 def update_sidebar_stats(data_json):
     gold, silver, coins, data = df_from_store(data_json)
-    items = [
+    return [
         html.P([html.Strong("Coins:"), f" {len(coins)}"], className="mb-1"),
         html.P([html.Strong("Gold:"), f" {len(gold)}"], className="mb-1"),
         html.P([html.Strong("Silver:"), f" {len(silver)}"], className="mb-1"),
-        html.P([html.Strong("Updated:"), f" {data.get('updated_at', '')[:19]}"],
-               className="mb-1", style={"font-size": "0.75rem"}),
+        html.P(
+            [html.Strong("Updated:"), f" {data.get('updated_at', '')[:19]}"],
+            className="mb-1",
+            style={"font-size": "0.75rem"},
+        ),
     ]
-    return items
+
+
+# ─── Session CSV Loader ─────────────────────────────────────────────
+
+
+@callback(
+    Output("session-data-display", "children"),
+    Input("session-select", "value"),
+    prevent_initial_call=True,
+)
+def load_session(filename):
+    if not filename:
+        return no_update
+    df = load_session_csv(filename)
+    if df.empty:
+        return dbc.Alert("Could not load session file.", color="warning")
+    tc = "window_start" if "window_start" in df.columns else "fetched_at"
+    if tc in df.columns:
+        df = df.sort_values(tc, ascending=False)
+    display = df.head(500)
+    return dbc.Card(
+        [
+            dbc.CardHeader(f"Session: {filename}"),
+            dbc.CardBody(
+                [
+                    html.P(
+                        f"{len(df)} total rows, showing {len(display)}.",
+                        className="text-muted",
+                    ),
+                    dash_table.DataTable(
+                        data=display.to_dict("records"),
+                        columns=[{"name": i, "id": i} for i in display.columns],
+                        page_size=20,
+                        sort_action="native",
+                        filter_action="native",
+                        style_table={"overflowX": "auto"},
+                        style_cell={
+                            "backgroundColor": "#1e1e1e",
+                            "color": "white",
+                            "textAlign": "left",
+                            "padding": "10px",
+                            "border": "1px solid #333",
+                        },
+                        style_header={
+                            "backgroundColor": "#333",
+                            "fontWeight": "bold",
+                            "border": "1px solid #444",
+                        },
+                        style_data_conditional=[
+                            {"if": {"row_index": "odd"}, "backgroundColor": "#252525"}
+                        ],
+                    ),
+                ]
+            ),
+        ],
+        className="mt-3 shadow-sm",
+    )

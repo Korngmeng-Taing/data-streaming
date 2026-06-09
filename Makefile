@@ -1,5 +1,5 @@
-.PHONY: help install test lint run-producer run-dash \
-        run-streaming run-ws docker-up docker-down clean
+.PHONY: help install test lint run-producer run-pipeline run-dash \
+        clean
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -13,45 +13,31 @@ test: ## Run all tests
 
 lint: ## Check syntax of all Python files
 	python -m py_compile config/validate.py
-	python -m py_compile config/spark_manager.py
-	python -m py_compile config/spark_config.py
 	python -m py_compile config/logging_config.py
 	python -m py_compile api/crypto_producer.py
 	python -m py_compile api/api_config.py
-	python -m py_compile spark/streaming_job.py
-	python -m py_compile spark/bronze_layer.py
-	python -m py_compile spark/silver_layer.py
-	python -m py_compile spark/gold_layer.py
+	python -m py_compile pipeline/processor.py
+	python -m py_compile pipeline/runner.py
 	python -m py_compile dash_app/app.py
 	python -m py_compile dash_app/alert_store.py
+	python -m py_compile dash_app/data_utils.py
+	python -m py_compile dash_app/pages.py
+	python -m py_compile dash_app/charts.py
+	python -m py_compile dash_app/callbacks.py
 	python -m py_compile viz/utils.py
-	python -m py_compile ws_gateway/server.py
-	python -m py_compile ws_gateway/client.py
 
-run-producer: ## Run the Kafka producer
+run-producer: ## Run the crypto producer
 	python -m api.crypto_producer
+
+run-pipeline: ## Run the data pipeline processor
+	python -m pipeline.runner
 
 run-dash: ## Run the Dash dashboard
 	python -m dash_app.app
 
-run-streaming: ## Run the Spark streaming job
-	python -m spark.streaming_job
-
-run-ws: ## Run the WebSocket gateway
-	python -m ws_gateway.server
-
 validate: ## Validate configuration
 	python -m config.validate
 
-docker-up: ## Build and start all services
-	docker-compose up --build -d
-
-docker-down: ## Stop all services
-	docker-compose down
-
-docker-logs: ## Tail logs from all services
-	docker-compose logs -f
-
 clean: ## Remove Python cache files
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	if exist .\__pycache__ rmdir /s /q .\__pycache__
+	for /d /r . %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d"

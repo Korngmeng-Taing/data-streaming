@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
+from dash_app.alert_store import load_alerts, load_history, save_alerts, save_history
 
 
 class TestAlertStore:
@@ -10,6 +10,7 @@ class TestAlertStore:
         self.alerts_path = os.path.join(self.tmp, "alerts.json")
         self.history_path = os.path.join(self.tmp, "history.json")
         import dash_app.alert_store as store
+
         store.ALERTS_PATH = self.alerts_path
         store.HISTORY_PATH = self.history_path
 
@@ -44,6 +45,7 @@ class TestAlertStore:
         os.environ["ALERTS_PATH"] = os.path.join(nested, "alerts.json")
         os.environ["HISTORY_PATH"] = os.path.join(nested, "history.json")
         import dash_app.alert_store as store
+
         store.ALERTS_PATH = os.path.join(nested, "alerts.json")
         store.HISTORY_PATH = os.path.join(nested, "history.json")
         save_alerts([{"id": 1}])

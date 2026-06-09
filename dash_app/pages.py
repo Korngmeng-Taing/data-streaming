@@ -1,33 +1,73 @@
-from dash import dcc, html
 import dash_bootstrap_components as dbc
 import pandas as pd
+from dash import dash_table, dcc, html
 
 from config.logging_config import setup_logger
-from dash_app.data_utils import df_from_store
 from dash_app.charts import (
-    build_main_price_chart, build_volume_chart, build_change_chart,
-    build_distribution_chart, build_volatility_chart,
-    build_technical_chart, build_normalized_chart, build_correlation_chart,
-    build_volume_comparison_chart, build_returns_chart, build_predictions_chart,
+    build_change_chart,
+    build_correlation_chart,
+    build_distribution_chart,
+    build_main_price_chart,
+    build_normalized_chart,
+    build_predictions_chart,
+    build_returns_chart,
+    build_technical_chart,
+    build_volatility_chart,
+    build_volume_chart,
+    build_volume_comparison_chart,
 )
-from prediction import predict_prices, ARIMA_ORDER
+from dash_app.data_utils import APP_START_TIME, df_from_store, list_session_files
+from prediction import ARIMA_ORDER, predict_prices
 
 logger = setup_logger("dash_app")
 
 
-def _filter_time_range(df, tc, time_range):
-    if time_range and time_range != "all" and not df.empty:
-        try:
-            minutes = int(time_range.replace("h", "")) * 60 if "h" in time_range else int(time_range.replace("m", ""))
-            now = df[tc].max()
-            cutoff = now - pd.Timedelta(minutes=minutes)
-            df = df[df[tc] >= cutoff]
-        except Exception:
+def _filter_time_range(df, tc, time_range, tz_offset=0):
+    if not df.empty:
+        if not pd.api.types.is_datetime64_any_dtype(df[tc]):
+            df[tc] = pd.to_datetime(df[tc])
+
+        epoch = df[tc].astype("int64") / 1e9
+
+        if time_range == "all":
             pass
+
+        try:
+            if time_range and time_range not in ("all", "session"):
+                if "h" in str(time_range):
+                    minutes = int(str(time_range).replace("h", "")) * 60
+                else:
+                    minutes = int(str(time_range).replace("m", ""))
+                cutoff = epoch.max() - minutes * 60
+                df = df[epoch >= cutoff]
+            elif time_range == "session":
+                filtered = df[epoch >= APP_START_TIME]
+                if not filtered.empty:
+                    df = filtered
+                else:
+                    cutoff = epoch.max() - 1800
+                    df = df[epoch >= cutoff]
+                    logger.warning(
+                        f"Session data empty, fell back to 30min. epoch=[{epoch.min():.0f},{epoch.max():.0f}] start={APP_START_TIME:.0f}"
+                    )
+        except Exception as e:
+            logger.warning(f"Time range filtering failed: {e}")
+
+        if tz_offset:
+            df[tc] = pd.to_datetime(df[tc]) + pd.Timedelta(minutes=-tz_offset)
     return df
 
 
-def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="line", time_range="all"):
+def make_overview(
+    gold,
+    silver,
+    sel_coins,
+    data,
+    timeframe="1m",
+    chart_type="line",
+    time_range="all",
+    tz_offset=0,
+):
     use_gold = not gold.empty
     if use_gold:
         df = gold
@@ -44,9 +84,11 @@ def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="lin
     else:
         return html.Div(dbc.Alert("No data available yet.", color="warning"))
     if not sel_coins:
-        return html.Div(dbc.Alert("Select coins from the sidebar to display.", color="info"))
+        return html.Div(
+            dbc.Alert("Select coins from the sidebar to display.", color="info")
+        )
 
-    df = _filter_time_range(df, tc, time_range)
+    df = _filter_time_range(df, tc, time_range, tz_offset)
     coin_filter = df[df["coin_id"].isin(sel_coins)]
     if coin_filter.empty:
         return html.Div(dbc.Alert("No data for the selected time range.", color="info"))
@@ -64,16 +106,29 @@ def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="lin
         last, prev = cdf.iloc[-1][vc], cdf.iloc[-2][vc]
         pct = ((last - prev) / prev * 100) if prev != 0 else 0
         delta_class = "text-success" if pct >= 0 else "text-danger"
-        cards.append(dbc.Col(
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6(coin.upper(), className="card-title text-muted"),
-                    html.H3(f"${last:.4f}", className="card-text"),
-                    html.Small(f"{pct:+.2f}%", className=delta_class),
-                ])
-            ], color="dark", inverse=True),
-            xs=6, sm=6, md=3, lg=3,
-        ))
+        cards.append(
+            dbc.Col(
+                dbc.Card(
+                    [
+                        dbc.CardBody(
+                            [
+                                html.H6(
+                                    coin.upper(), className="card-title text-muted"
+                                ),
+                                html.H3(f"${last:.4f}", className="card-text"),
+                                html.Small(f"{pct:+.2f}%", className=delta_class),
+                            ]
+                        )
+                    ],
+                    color="dark",
+                    inverse=True,
+                ),
+                xs=6,
+                sm=6,
+                md=3,
+                lg=3,
+            )
+        )
 
     fig_dist = build_distribution_chart(coin_filter, sel_coins, vc)
     fig_vola = build_volatility_chart(coin_filter, sel_coins, tc, voc, use_gold)
@@ -82,59 +137,107 @@ def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="lin
     if not recent.empty and tc in recent.columns:
         recent[tc] = recent[tc].astype(str)
 
-    tf_label = {"1m": "1 min", "5m": "5 min", "15m": "15 min", "30m": "30 min", "1h": "1 hour"}.get(timeframe or "1m", timeframe)
+    tf_label = {
+        "1m": "1 min",
+        "5m": "5 min",
+        "15m": "15 min",
+        "30m": "30 min",
+        "1h": "1 hour",
+    }.get(timeframe or "1m", timeframe)
 
     export_id = "export-csv-btn"
-    recent_json = recent.head(20).to_json(date_format="iso", orient="records") if not recent.empty else "[]"
+    recent_json = (
+        recent.head(20).to_json(date_format="iso", orient="records")
+        if not recent.empty
+        else "[]"
+    )
 
-    return html.Div([
-        html.H3("Overview", className="mb-3"),
-        html.Small(f"Layer: {'Gold' if use_gold else 'Silver'} ({tf_label}) · "
-                   f"{len(sel_coins)} coins · {now_val}", className="text-muted"),
-        dbc.Row([
-            dbc.Col([
-                html.Label("Export", style={"font-size": "0.85rem", "color": "#aaa"}),
-                dbc.Button("Download CSV", id=export_id, color="secondary", size="sm",
-                           style={"font-size": "0.8rem"}),
-                dcc.Download(id="download-csv"),
-            ], xs=12, sm=6, md=3),
-        ], className="mb-3"),
-        html.Div(dbc.Row(cards), className="mt-3 mb-4"),
-        dcc.Graph(figure=fig_main, className="mb-4"),
-        dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig_vol), xs=12, md=6),
-            dbc.Col(dcc.Graph(figure=fig_chg), xs=12, md=6),
-        ], className="mb-4"),
-        dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig_dist), xs=12, md=6),
-            dbc.Col(dcc.Graph(figure=fig_vola), xs=12, md=6),
-        ], className="mb-4"),
-        html.H5("Recent Data", className="mt-4 mb-2"),
-        dbc.Table.from_dataframe(recent.head(20), striped=True, bordered=False,
-                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
-        html.Div(id="recent-data-json", style={"display": "none"}, children=recent_json),
-    ])
+    return html.Div(
+        [
+            html.H3("Overview", className="mb-3"),
+            html.Small(
+                f"Layer: {'Gold' if use_gold else 'Silver'} ({tf_label}) · "
+                f"{len(sel_coins)} coins · {now_val}",
+                className="text-muted",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.Label(
+                                "Export",
+                                style={"font-size": "0.85rem", "color": "#aaa"},
+                            ),
+                            dbc.Button(
+                                "Download CSV",
+                                id=export_id,
+                                color="secondary",
+                                size="sm",
+                                style={"font-size": "0.8rem"},
+                            ),
+                            dcc.Download(id="download-csv"),
+                        ],
+                        xs=12,
+                        sm=6,
+                        md=3,
+                    ),
+                ],
+                className="mb-3",
+            ),
+            html.Div(dbc.Row(cards), className="mt-3 mb-4"),
+            dcc.Graph(figure=fig_main, className="mb-4"),
+            dbc.Row(
+                [
+                    dbc.Col(dcc.Graph(figure=fig_vol), xs=12, md=6),
+                    dbc.Col(dcc.Graph(figure=fig_chg), xs=12, md=6),
+                ],
+                className="mb-4",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(dcc.Graph(figure=fig_dist), xs=12, md=6),
+                    dbc.Col(dcc.Graph(figure=fig_vola), xs=12, md=6),
+                ],
+                className="mb-4",
+            ),
+            html.H5("Recent Data", className="mt-4 mb-2"),
+            dbc.Table.from_dataframe(
+                recent.head(20),
+                striped=True,
+                bordered=False,
+                class_name="table-dark",
+                hover=True,
+                responsive=True,
+                size="sm",
+            ),
+            html.Div(
+                id="recent-data-json", style={"display": "none"}, children=recent_json
+            ),
+        ]
+    )
 
 
 def make_technical(gold, silver, sel_coins, data):
     if gold.empty and silver.empty:
         return html.Div(dbc.Alert("No data available.", color="warning"))
-    return html.Div([
-        html.H3("Technical Analysis"),
-        dcc.Dropdown(
-            id="ta-coin-dropdown",
-            options=[{"label": c.upper(), "value": c} for c in sel_coins],
-            value=sel_coins[0] if sel_coins else None,
-            clearable=False,
-            className="mb-3",
-            style={"color": "#000"},
-        ),
-        html.Div(id="ta-content"),
-    ])
+    return html.Div(
+        [
+            html.H3("Technical Analysis"),
+            dcc.Dropdown(
+                id="ta-coin-dropdown",
+                options=[{"label": c.upper(), "value": c} for c in sel_coins],
+                value=sel_coins[0] if sel_coins else None,
+                clearable=False,
+                className="mb-3",
+                style={"color": "#000"},
+            ),
+            html.Div(id="ta-content"),
+        ]
+    )
 
 
 def _get_auto_interpretation(price, cdf, last_price):
-    from viz.utils import rsi, bollinger, sma
+    from viz.utils import bollinger, rsi, sma
 
     # 1. RSI Interpretation
     rsi_val = rsi(price, 14).iloc[-1] if len(cdf) >= 14 else 50
@@ -226,59 +329,134 @@ def _get_auto_interpretation(price, cdf, last_price):
         recommendation = "Strong Sell"
         rec_style = {"color": "#F44336", "fontWeight": "bold", "fontSize": "1.5rem"}
 
-    return dbc.Card([
-        dbc.CardHeader(html.H5("📊 Auto-Interpretation & Recommendations", className="mb-0 text-white")),
-        dbc.CardBody([
-            dbc.Row([
-                dbc.Col([
-                    html.H6("Overall Signal:", className="text-muted mb-1"),
-                    html.Span(recommendation, style=rec_style),
-                    html.P(f"Signal Score: {total_score:+d}", className="text-muted mt-2 mb-0 small"),
-                    html.P("Based on RSI, Bollinger Bands, and SMA", className="text-muted small", style={"font-size": "0.75rem"}),
-                ], xs=12, md=4, className="border-end border-secondary d-flex flex-column justify-content-center align-items-center text-center"),
-                
-                dbc.Col([
-                    html.Div([
-                        html.Div([
-                            html.Strong("Relative Strength Index (RSI):"),
-                            dbc.Badge(rsi_signal, color=rsi_color, className="ms-2"),
-                        ], className="d-flex align-items-center justify-content-between mb-1"),
-                        html.P(rsi_desc, className="small text-muted mb-3"),
-                        
-                        html.Div([
-                            html.Strong("Bollinger Bands (BB):"),
-                            dbc.Badge(bb_signal, color=bb_color, className="ms-2"),
-                        ], className="d-flex align-items-center justify-content-between mb-1"),
-                        html.P(bb_desc, className="small text-muted mb-3"),
-                        
-                        html.Div([
-                            html.Strong("Moving Averages (SMA):"),
-                            dbc.Badge(ma_signal, color=ma_color, className="ms-2"),
-                        ], className="d-flex align-items-center justify-content-between mb-1"),
-                        html.P(ma_desc, className="small text-muted mb-0"),
-                    ])
-                ], xs=12, md=8, className="ps-md-4 mt-3 mt-md-0"),
-            ])
-        ])
-    ], color="dark", outline=True, className="mb-4 shadow")
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                html.H5(
+                    "📊 Auto-Interpretation & Recommendations",
+                    className="mb-0 text-white",
+                )
+            ),
+            dbc.CardBody(
+                [
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    html.H6(
+                                        "Overall Signal:", className="text-muted mb-1"
+                                    ),
+                                    html.Span(recommendation, style=rec_style),
+                                    html.P(
+                                        f"Signal Score: {total_score:+d}",
+                                        className="text-muted mt-2 mb-0 small",
+                                    ),
+                                    html.P(
+                                        "Based on RSI, Bollinger Bands, and SMA",
+                                        className="text-muted small",
+                                        style={"font-size": "0.75rem"},
+                                    ),
+                                ],
+                                xs=12,
+                                md=4,
+                                className="border-end border-secondary d-flex flex-column justify-content-center align-items-center text-center",
+                            ),
+                            dbc.Col(
+                                [
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                [
+                                                    html.Strong(
+                                                        "Relative Strength Index (RSI):"
+                                                    ),
+                                                    dbc.Badge(
+                                                        rsi_signal,
+                                                        color=rsi_color,
+                                                        className="ms-2",
+                                                    ),
+                                                ],
+                                                className="d-flex align-items-center justify-content-between mb-1",
+                                            ),
+                                            html.P(
+                                                rsi_desc,
+                                                className="small text-muted mb-3",
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Strong(
+                                                        "Bollinger Bands (BB):"
+                                                    ),
+                                                    dbc.Badge(
+                                                        bb_signal,
+                                                        color=bb_color,
+                                                        className="ms-2",
+                                                    ),
+                                                ],
+                                                className="d-flex align-items-center justify-content-between mb-1",
+                                            ),
+                                            html.P(
+                                                bb_desc,
+                                                className="small text-muted mb-3",
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Strong(
+                                                        "Moving Averages (SMA):"
+                                                    ),
+                                                    dbc.Badge(
+                                                        ma_signal,
+                                                        color=ma_color,
+                                                        className="ms-2",
+                                                    ),
+                                                ],
+                                                className="d-flex align-items-center justify-content-between mb-1",
+                                            ),
+                                            html.P(
+                                                ma_desc,
+                                                className="small text-muted mb-0",
+                                            ),
+                                        ]
+                                    )
+                                ],
+                                xs=12,
+                                md=8,
+                                className="ps-md-4 mt-3 mt-md-0",
+                            ),
+                        ]
+                    )
+                ]
+            ),
+        ],
+        color="dark",
+        outline=True,
+        className="mb-4 shadow",
+    )
 
 
-def _update_technical_content(coin, data_json, timeframe, resample_df):
+def _update_technical_content(coin, data_json, timeframe, resample_df, time_range=None):
     if not coin:
         return None
     gold, silver, coins, data = df_from_store(data_json)
     use_gold = not gold.empty
-    if use_gold:
-        from dash_app.data_utils import resample_df as _resample
-        try:
-            gold = _resample(gold, timeframe or "1m", "window_start")
-        except Exception as e:
-            logger.warning(f"Technical: resample failed for {timeframe}: {e}")
+
     df = gold if use_gold else silver
     if df.empty:
         return None
 
     tc = "window_start" if use_gold else "fetched_at"
+
+    # Apply time filtering
+    df = _filter_time_range(df, tc, time_range)
+
+    if use_gold:
+        from dash_app.data_utils import resample_df as _resample
+
+        try:
+            df = _resample(df, timeframe or "1m", tc)
+        except Exception as e:
+            logger.warning(f"Technical: resample failed for {timeframe}: {e}")
+
     vc = "avg_price" if use_gold else "price_usd"
     voc = "avg_volume" if use_gold else "volume_24h_usd"
     cc = "avg_change_pct" if use_gold else "change_24h_pct"
@@ -287,30 +465,57 @@ def _update_technical_content(coin, data_json, timeframe, resample_df):
     if len(cdf) < 5:
         return None
 
-    from viz.utils import rsi, bollinger
+    from viz.utils import bollinger, rsi
+
     price = cdf[vc]
     fig = build_technical_chart(cdf, coin, tc, vc, voc, cc)
 
     last_price = price.iloc[-1]
     rsi_val = rsi(price, 14).iloc[-1] if len(cdf) >= 14 else 50
-    bb_width = (bollinger(price)[1] - bollinger(price)[2]).iloc[-1] if len(cdf) >= 20 else 0
-    pchg = ((price.iloc[-1] - price.iloc[0]) / price.iloc[0] * 100) if len(price) > 1 else 0
+    bb_width = (
+        (bollinger(price)[1] - bollinger(price)[2]).iloc[-1] if len(cdf) >= 20 else 0
+    )
+    pchg = (
+        ((price.iloc[-1] - price.iloc[0]) / price.iloc[0] * 100)
+        if len(price) > 1
+        else 0
+    )
 
     card_data = [
         ("Current", f"${last_price:.4f}", ""),
-        ("RSI (14)", f"{rsi_val:.1f}",
-         "Neutral" if 30 < rsi_val < 70 else "Overbought" if rsi_val >= 70 else "Oversold"),
+        (
+            "RSI (14)",
+            f"{rsi_val:.1f}",
+            "Neutral"
+            if 30 < rsi_val < 70
+            else "Overbought"
+            if rsi_val >= 70
+            else "Oversold",
+        ),
         ("BB Width", f"${bb_width:.4f}", ""),
         ("Period Change", f"{pchg:+.2f}%", ""),
     ]
-    cards = dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H6(label, className="text-muted"),
-            html.H4(val, className="card-text"),
-            html.Small(note, className="text-muted") if note else "",
-        ]), color="dark", inverse=True), xs=6, sm=3)
-        for label, val, note in card_data
-    ], className="mb-3")
+    cards = dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.H6(label, className="text-muted"),
+                            html.H4(val, className="card-text"),
+                            html.Small(note, className="text-muted") if note else "",
+                        ]
+                    ),
+                    color="dark",
+                    inverse=True,
+                ),
+                xs=6,
+                sm=3,
+            )
+            for label, val, note in card_data
+        ],
+        className="mb-3",
+    )
 
     interpretation_card = _get_auto_interpretation(price, cdf, last_price)
 
@@ -325,23 +530,33 @@ def make_comparison(gold, silver, sel_coins, data):
 
     tc = "window_start" if use_gold else "fetched_at"
     vc = "avg_price" if use_gold else "price_usd"
-    voc = "avg_volume" if use_gold else ("avg_volume" if "avg_volume" in df.columns else "volume_24h_usd")
+    voc = (
+        "avg_volume"
+        if use_gold
+        else ("avg_volume" if "avg_volume" in df.columns else "volume_24h_usd")
+    )
     coin_filter = df[df["coin_id"].isin(sel_coins)]
 
     if len(sel_coins) < 2:
-        return html.Div(dbc.Alert("Select at least 2 coins in the sidebar for comparison.", color="info"))
+        return html.Div(
+            dbc.Alert(
+                "Select at least 2 coins in the sidebar for comparison.", color="info"
+            )
+        )
 
     fig_norm = build_normalized_chart(coin_filter, sel_coins, tc, vc)
 
     pivot = coin_filter.pivot_table(
         index=coin_filter.groupby("coin_id").cumcount(),
-        columns="coin_id", values=vc,
+        columns="coin_id",
+        values=vc,
     )
     fig_corr = build_correlation_chart(pivot)
 
     vol_pivot = coin_filter.pivot_table(
         index=coin_filter.groupby("coin_id").cumcount(),
-        columns="coin_id", values=voc,
+        columns="coin_id",
+        values=voc,
     )
     fig_vc = build_volume_comparison_chart(vol_pivot)
 
@@ -354,20 +569,27 @@ def make_comparison(gold, silver, sel_coins, data):
                 returns_data.append({"coin": coin.upper(), "return_pct": val * 100})
     fig_ret = build_returns_chart(returns_data)
 
-    return html.Div([
-        html.H3("Multi-Coin Comparison"),
-        dcc.Graph(figure=fig_norm, className="mb-4"),
-        dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig_corr), xs=12, md=6),
-            dbc.Col(dcc.Graph(figure=fig_vc), xs=12, md=6),
-        ], className="mb-4"),
-        dcc.Graph(figure=fig_ret, className="mb-4"),
-    ])
+    return html.Div(
+        [
+            html.H3("Multi-Coin Comparison"),
+            dcc.Graph(figure=fig_norm, className="mb-4"),
+            dbc.Row(
+                [
+                    dbc.Col(dcc.Graph(figure=fig_corr), xs=12, md=6),
+                    dbc.Col(dcc.Graph(figure=fig_vc), xs=12, md=6),
+                ],
+                className="mb-4",
+            ),
+            dcc.Graph(figure=fig_ret, className="mb-4"),
+        ]
+    )
 
 
 def make_predictions(gold, sel_coins, timeframe, model="arima"):
     if gold.empty:
-        return html.Div(dbc.Alert("No historical data available for predictions.", color="warning"))
+        return html.Div(
+            dbc.Alert("No historical data available for predictions.", color="warning")
+        )
 
     coins = sel_coins if sel_coins else gold["coin_id"].unique().tolist()
     gold_filtered = gold[gold["coin_id"].isin(coins)].copy()
@@ -375,59 +597,94 @@ def make_predictions(gold, sel_coins, timeframe, model="arima"):
     forecasts = predict_prices(gold_filtered, model=model)
 
     if not forecasts:
-        return html.Div(dbc.Alert(
-            "Could not generate predictions. Please select at least one coin with data.",
-            color="warning",
-        ))
+        return html.Div(
+            dbc.Alert(
+                "Could not generate predictions. Please select at least one coin with data.",
+                color="warning",
+            )
+        )
 
     fig = build_predictions_chart(forecasts, gold_filtered)
 
     stats = []
 
     for i, (coin, fcast) in enumerate(forecasts.items()):
-        hist = gold_filtered[gold_filtered["coin_id"] == coin].sort_values("window_start")
+        hist = gold_filtered[gold_filtered["coin_id"] == coin].sort_values(
+            "window_start"
+        )
+        if hist.empty:
+            continue
         last_price = hist["avg_price"].iloc[-1]
         last_pred = fcast["predicted_price"].iloc[-1]
         change_pct = ((last_pred - last_price) / last_price) * 100
         stats.append(
-            dbc.Card(dbc.CardBody([
-                html.H6(coin, className="card-title"),
-                html.P(f"Last: ${last_price:.2f}", className="mb-1"),
-                html.P(f"Forecast: ${last_pred:.2f}", className="mb-1"),
-                html.P(
-                    f"Change: {change_pct:+.2f}%",
-                    style={"color": "green" if change_pct >= 0 else "red", "font-weight": "bold"},
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6(coin, className="card-title"),
+                        html.P(f"Last: ${last_price:.2f}", className="mb-1"),
+                        html.P(f"Forecast: ${last_pred:.2f}", className="mb-1"),
+                        html.P(
+                            f"Change: {change_pct:+.2f}%",
+                            style={
+                                "color": "green" if change_pct >= 0 else "red",
+                                "font-weight": "bold",
+                            },
+                        ),
+                    ]
                 ),
-            ]), className="mb-2")
+                className="mb-2",
+            )
         )
-        stats.append(dbc.Card(dbc.CardBody([
-            html.H6(f"{coin} - Next {len(fcast)} Steps", className="card-title"),
-            html.Table(
-                [html.Tr([html.Th("Step"), html.Th("Timestamp"), html.Th("Price")])] +
-                [
-                    html.Tr([
-                        html.Td(str(j + 1)),
-                        html.Td(str(row["window_start"])),
-                        html.Td(f"${row['predicted_price']:.2f}"),
-                    ])
-                    for j, (_, row) in enumerate(fcast.iterrows())
-                ],
-                className="table table-sm table-dark",
-                style={"font-size": "0.8rem"},
-            ),
-        ]), className="mb-3"))
+        stats.append(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6(
+                            f"{coin} - Next {len(fcast)} Steps", className="card-title"
+                        ),
+                        html.Table(
+                            [
+                                html.Tr(
+                                    [
+                                        html.Th("Step"),
+                                        html.Th("Timestamp"),
+                                        html.Th("Price"),
+                                    ]
+                                )
+                            ]
+                            + [
+                                html.Tr(
+                                    [
+                                        html.Td(str(j + 1)),
+                                        html.Td(str(row["window_start"])),
+                                        html.Td(f"${row['predicted_price']:.2f}"),
+                                    ]
+                                )
+                                for j, (_, row) in enumerate(fcast.iterrows())
+                            ],
+                            className="table table-sm table-dark",
+                            style={"font-size": "0.8rem"},
+                        ),
+                    ]
+                ),
+                className="mb-3",
+            )
+        )
 
     model_label = "Prophet (seasonal)" if model == "prophet" else f"ARIMA{ARIMA_ORDER}"
 
-    return html.Div([
-        html.H3("Price Prediction", className="mb-3"),
-        html.P(
-            f"Using {model_label} per coin with {len(next(iter(forecasts.values())))}-step forecast.",
-            style={"color": "#aaa"},
-        ),
-        dbc.Row([dbc.Col(card, xs=12, md=4) for card in stats], className="mb-4"),
-        dcc.Graph(figure=fig, className="mb-4"),
-    ])
+    return html.Div(
+        [
+            html.H3("Price Prediction", className="mb-3"),
+            html.P(
+                f"Using {model_label} per coin with {len(next(iter(forecasts.values())))}-step forecast.",
+                style={"color": "#aaa"},
+            ),
+            dbc.Row([dbc.Col(card, xs=12, md=4) for card in stats], className="mb-4"),
+            dcc.Graph(figure=fig, className="mb-4"),
+        ]
+    )
 
 
 def make_pipeline(gold, silver, coins, data):
@@ -447,78 +704,360 @@ def make_pipeline(gold, silver, coins, data):
         cdf = df[df["coin_id"] == coin]
         if cdf.empty:
             continue
-        stats_rows.append({
-            "Coin": coin.upper(),
-            "Records": len(cdf),
-            "Latest": f"${cdf[vc].iloc[-1]:.4f}" if vc in cdf.columns else "-",
-            "Avg": f"${cdf[vc].mean():.4f}",
-            "Min": f"${cdf[vc].min():.4f}",
-            "Max": f"${cdf[vc].max():.4f}",
-            "Volume": f"${cdf[voc].sum():,.0f}" if voc in cdf.columns else "-",
-        })
-    stats_df = pd.DataFrame(stats_rows).sort_values("Records", ascending=False) if stats_rows else pd.DataFrame()
+        stats_rows.append(
+            {
+                "Coin": coin.upper(),
+                "Records": len(cdf),
+                "Latest": f"${cdf[vc].iloc[-1]:.4f}" if vc in cdf.columns else "-",
+                "Avg": f"${cdf[vc].mean():.4f}",
+                "Min": f"${cdf[vc].min():.4f}",
+                "Max": f"${cdf[vc].max():.4f}",
+                "Volume": f"${cdf[voc].sum():,.0f}" if voc in cdf.columns else "-",
+            }
+        )
+    stats_df = (
+        pd.DataFrame(stats_rows).sort_values("Records", ascending=False)
+        if stats_rows
+        else pd.DataFrame()
+    )
 
-    return html.Div([
-        html.H3("Pipeline Status"),
-        dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Gold Records", className="text-muted"),
-                html.H3(f"{total_gold:,}", className="card-text"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Silver Records", className="text-muted"),
-                html.H3(f"{total_silver:,}", className="card-text"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Coins Tracked", className="text-muted"),
-                html.H3(str(len(coins)), className="card-text"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.H6("Data Layer", className="text-muted"),
-                html.H3(layer_label, className="card-text"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-        ], className="mb-4"),
-        html.H5("Per-Coin Stats"),
-        dbc.Table.from_dataframe(stats_df, striped=True, bordered=False,
-                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
-        html.H5("Data Freshness", className="mt-4"),
-        dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.P(["Oldest: ", html.Br(), str(df[tc].min()) if not df.empty else "N/A"],
-                       className="mb-0"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-            dbc.Col(dbc.Card(dbc.CardBody([
-                html.P(["Newest: ", html.Br(), str(now_val) if not df.empty else "N/A"],
-                       className="mb-0"),
-            ]), color="dark", inverse=True), xs=6, sm=3),
-        ]),
-    ])
+    return html.Div(
+        [
+            html.H3("Pipeline Status"),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Gold Records", className="text-muted"),
+                                    html.H3(f"{total_gold:,}", className="card-text"),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Silver Records", className="text-muted"),
+                                    html.H3(f"{total_silver:,}", className="card-text"),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Coins Tracked", className="text-muted"),
+                                    html.H3(str(len(coins)), className="card-text"),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Data Layer", className="text-muted"),
+                                    html.H3(layer_label, className="card-text"),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                ],
+                className="mb-4",
+            ),
+            html.H5("Per-Coin Stats"),
+            dbc.Table.from_dataframe(
+                stats_df,
+                striped=True,
+                bordered=False,
+                class_name="table-dark",
+                hover=True,
+                responsive=True,
+                size="sm",
+            ),
+            html.H5("Data Freshness", className="mt-4"),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.P(
+                                        [
+                                            "Oldest: ",
+                                            html.Br(),
+                                            str(df[tc].min())
+                                            if not df.empty
+                                            else "N/A",
+                                        ],
+                                        className="mb-0",
+                                    ),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.P(
+                                        [
+                                            "Newest: ",
+                                            html.Br(),
+                                            str(now_val) if not df.empty else "N/A",
+                                        ],
+                                        className="mb-0",
+                                    ),
+                                ]
+                            ),
+                            color="dark",
+                            inverse=True,
+                        ),
+                        xs=6,
+                        sm=3,
+                    ),
+                ]
+            ),
+        ]
+    )
 
 
 def make_alerts(gold, silver, sel_coins, data):
-    return html.Div([
-        html.H3("Alert System"),
-        dbc.Row([
-            dbc.Col([
-                html.H5("Create Alert"),
-                dbc.Card(dbc.CardBody([
-                    dbc.Label("Coin"),
-                    dcc.Dropdown(id="alert-coin", options=[{"label": c.upper(), "value": c} for c in sel_coins],
-                                 value=sel_coins[0] if sel_coins else None, style={"color": "#000"}),
-                    dbc.Label("Type", className="mt-2"),
-                    dcc.Dropdown(id="alert-type", options=[
-                        {"label": "Price threshold", "value": "price"},
-                        {"label": "24h Change %", "value": "change_24h"},
-                    ], value="price", style={"color": "#000"}),
-                    html.Div(id="alert-config"),
-                    dbc.Button("Add Alert", id="add-alert-btn", color="primary", className="mt-3", n_clicks=0),
-                ]), color="dark", inverse=True),
-            ], xs=12, md=6),
-            dbc.Col([
-                html.H5("Active Alerts"),
-                html.Div(id="active-alerts-list"),
-            ], xs=12, md=6),
-        ]),
-        html.H5("Alert History", className="mt-4"),
-        html.Div(id="alert-history-list"),
-    ])
+    return html.Div(
+        [
+            html.H3("Alert System"),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.H5("Create Alert"),
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        dbc.Label("Coin"),
+                                        dcc.Dropdown(
+                                            id="alert-coin",
+                                            options=[
+                                                {"label": c.upper(), "value": c}
+                                                for c in sel_coins
+                                            ],
+                                            value=sel_coins[0] if sel_coins else None,
+                                            style={"color": "#000"},
+                                        ),
+                                        dbc.Label("Type", className="mt-2"),
+                                        dcc.Dropdown(
+                                            id="alert-type",
+                                            options=[
+                                                {
+                                                    "label": "Price threshold",
+                                                    "value": "price",
+                                                },
+                                                {
+                                                    "label": "24h Change %",
+                                                    "value": "change_24h",
+                                                },
+                                            ],
+                                            value="price",
+                                            style={"color": "#000"},
+                                        ),
+                                        html.Div(id="alert-config"),
+                                        dbc.Button(
+                                            "Add Alert",
+                                            id="add-alert-btn",
+                                            color="primary",
+                                            className="mt-3",
+                                            n_clicks=0,
+                                        ),
+                                    ]
+                                ),
+                                color="dark",
+                                inverse=True,
+                            ),
+                        ],
+                        xs=12,
+                        md=6,
+                    ),
+                    dbc.Col(
+                        [
+                            html.H5("Active Alerts"),
+                            html.Div(id="active-alerts-list"),
+                        ],
+                        xs=12,
+                        md=6,
+                    ),
+                ]
+            ),
+            html.H5("Alert History", className="mt-4"),
+            html.Div(id="alert-history-list"),
+        ]
+    )
+
+
+def make_data_explorer(gold, silver, sel_coins, data, time_range="all", tz_offset=0):
+    use_gold = not gold.empty
+    df = gold if use_gold else silver
+    layer_name = "Gold (Aggregated)" if use_gold else "Silver (Cleaned)"
+
+    session_files = list_session_files()
+
+    if df.empty and not session_files:
+        return html.Div(
+            [
+                html.H3("Data Explorer"),
+                dbc.Alert(
+                    "No data available in either Gold or Silver layers.",
+                    color="warning",
+                    className="mt-3",
+                ),
+            ]
+        )
+
+    tc = "window_start" if use_gold else "fetched_at"
+    if tc in df.columns:
+        df = _filter_time_range(df, tc, time_range, tz_offset)
+        df = df.sort_values(tc, ascending=False)
+
+    if sel_coins:
+        df = df[df["coin_id"].isin(sel_coins)]
+
+    display_df = df.head(500)
+    ts_label = {
+        "session": "Session",
+        "all": "All time",
+        "30m": "30 min",
+        "1h": "1 hour",
+        "6h": "6 hours",
+        "24h": "24 hours",
+    }.get(time_range, time_range)
+
+    export_id = "data-export-csv-btn"
+    display_json = (
+        display_df.to_json(date_format="iso", orient="records")
+        if not display_df.empty
+        else "[]"
+    )
+
+    session_dropdown = html.Div()
+    if session_files:
+        session_dropdown = html.Div(
+            [
+                html.Label(
+                    "Load Past Session",
+                    style={
+                        "font-size": "0.85rem",
+                        "color": "#aaa",
+                        "margin-bottom": "4px",
+                    },
+                ),
+                dcc.Dropdown(
+                    id="session-select",
+                    options=[{"label": f, "value": f} for f in session_files],
+                    placeholder="Select a session CSV...",
+                    style={"color": "#000", "font-size": "0.85rem"},
+                ),
+                html.Div(id="session-data-display"),
+            ],
+            className="mt-3",
+        )
+
+    return html.Div(
+        [
+            html.H3("Data Explorer"),
+            html.P(
+                [
+                    html.Span(
+                        f"Viewing {layer_name} layer ({ts_label}). ",
+                        className="text-muted",
+                    ),
+                    html.Span(
+                        f"Showing {len(display_df)} of {len(df)} total rows.",
+                        className="fw-bold",
+                    ),
+                ]
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            dbc.Button(
+                                "Download CSV",
+                                id=export_id,
+                                color="secondary",
+                                size="sm",
+                                style={"font-size": "0.8rem"},
+                            ),
+                            dcc.Download(id="data-download-csv"),
+                        ],
+                        xs="auto",
+                    ),
+                ],
+                className="mb-3",
+            ),
+            dbc.Card(
+                [
+                    dbc.CardHeader("Raw Data Table"),
+                    dbc.CardBody(
+                        [
+                            dash_table.DataTable(
+                                data=display_df.to_dict("records"),
+                                columns=[
+                                    {"name": i, "id": i} for i in display_df.columns
+                                ],
+                                page_size=20,
+                                sort_action="native",
+                                filter_action="native",
+                                style_table={"overflowX": "auto"},
+                                style_cell={
+                                    "backgroundColor": "#1e1e1e",
+                                    "color": "white",
+                                    "textAlign": "left",
+                                    "padding": "10px",
+                                    "border": "1px solid #333",
+                                },
+                                style_header={
+                                    "backgroundColor": "#333",
+                                    "fontWeight": "bold",
+                                    "border": "1px solid #444",
+                                },
+                                style_data_conditional=[
+                                    {
+                                        "if": {"row_index": "odd"},
+                                        "backgroundColor": "#252525",
+                                    }
+                                ],
+                            )
+                        ]
+                    ),
+                ],
+                className="mt-3 shadow-sm",
+            ),
+            session_dropdown,
+            html.Div(
+                id="data-export-json", style={"display": "none"}, children=display_json
+            ),
+        ]
+    )

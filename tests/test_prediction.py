@@ -1,5 +1,5 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from prediction.arima import predict_prices as predict_arima
 from prediction.prophet_model import predict_prices_prophet
@@ -8,11 +8,15 @@ from prediction.prophet_model import predict_prices_prophet
 def _make_gold_df(n=30):
     dates = pd.date_range("2025-01-01", periods=n, freq="1min")
     prices = np.linspace(100, 110, n) + np.random.randn(n) * 2
-    return pd.DataFrame({
-        "coin_id": ["bitcoin"] * n,
-        "window_start": dates,
-        "avg_price": prices,
-    })
+    volumes = np.random.uniform(1000, 5000, n)
+    return pd.DataFrame(
+        {
+            "coin_id": ["bitcoin"] * n,
+            "window_start": dates,
+            "avg_price": prices,
+            "avg_volume": volumes,
+        }
+    )
 
 
 class TestARIMA:

@@ -1,88 +1,16 @@
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    hostname: zookeeper
-    container_name: crypto-zookeeper
-    networks: [crypto-net]
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-      ZOOKEEPER_DATA_DIR: /var/lib/zookeeper/data
-      ZOOKEEPER_SYNC_LIMIT: 5
-      ZOOKEEPER_INIT_LIMIT: 10
-    volumes:
-      - zookeeper-data:/var/lib/zookeeper/data
-    healthcheck:
-      test: echo srvr | nc -w 2 localhost 2181 || exit 1
-      interval: 10s
-      retries: 10
-      start_period: 20s
-
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    hostname: kafka
-    container_name: crypto-kafka
-    networks: [crypto-net]
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    ports:
-      - "9092:9092"
-      - "9093:9093"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_LOG_DIRS: /var/lib/kafka/data
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: nc -z localhost 9092 || exit 1
-      interval: 10s
-      retries: 15
-      start_period: 30s
-
-  init-kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    container_name: crypto-init-kafka
-    networks: [crypto-net]
-    depends_on:
-      kafka:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      "
-      echo 'Creating Kafka topic...'
-      kafka-topics --bootstrap-server kafka:9092 --create \
-        --topic crypto-prices --partitions 3 --replication-factor 1 --if-not-exists
-      echo 'Topic created.'
-      "
-
   crypto-producer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        - SPARK_VERSION=3.5.0
+    build: .
     container_name: crypto-producer
     networks: [crypto-net]
-    depends_on:
-      init-kafka:
-        condition: service_completed_successfully
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: crypto-prices
       CRYPTO_API_BASE_URL: https://api.coingecko.com/api/v3
       CRYPTO_IDS: bitcoin,ethereum,solana,cardano,polkadot
       VS_CURRENCY: usd
+      USE_MOCK_DATA: "false"
+      OUTPUT_PATH: /data/dwh
+    volumes:
+      - crypto-dwh:/data/dwh
     healthcheck:
       test: pgrep -f "api.crypto_producer" || exit 1
       interval: 15s
@@ -91,78 +19,35 @@ services:
     restart: unless-stopped
     command: python -m api.crypto_producer
 
-  spark-streaming:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        - SPARK_VERSION=3.5.0
-    container_name: crypto-spark-streaming
+  pipeline:
+    build: .
+    container_name: crypto-pipeline
     networks: [crypto-net]
     depends_on:
-      init-kafka:
-        condition: service_completed_successfully
+      - crypto-producer
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: crypto-prices
       OUTPUT_PATH: /data/dwh
-      CHECKPOINT_DIR: /data/checkpoints
-      SPARK_MASTER: local[2]
     volumes:
       - crypto-dwh:/data/dwh
-      - crypto-checkpoints:/data/checkpoints
     healthcheck:
-      test: pgrep -f "spark.streaming_job" || exit 1
+      test: pgrep -f "pipeline.runner" || exit 1
       interval: 15s
       retries: 5
-      start_period: 30s
+      start_period: 10s
     restart: unless-stopped
-    command: python -m spark.streaming_job
-
-  ws-gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        - SPARK_VERSION=3.5.0
-    container_name: crypto-ws-gateway
-    networks: [crypto-net]
-    ports:
-      - "8765:8765"
-      - "8766:8766"
-    depends_on:
-      init-kafka:
-        condition: service_completed_successfully
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: crypto-prices
-      WS_HOST: 0.0.0.0
-      WS_PORT: 8765
-    healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8766 || exit 1
-      interval: 10s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
-    command: python -m ws_gateway.server
+    command: python -m pipeline.runner
 
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        - SPARK_VERSION=3.5.0
+    build: .
     container_name: crypto-dashboard
     networks: [crypto-net]
     ports:
       - "8501:8501"
     depends_on:
-      - spark-streaming
-      - ws-gateway
+      - pipeline
     environment:
       OUTPUT_PATH: /data/dwh
       PORT: 8501
-      WS_GATEWAY_HOST: ws-gateway
     volumes:
       - crypto-dwh:/data/dwh
     healthcheck:
@@ -170,6 +55,7 @@ services:
       interval: 15s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
     command: python -m dash_app.app
 
 networks:
@@ -178,6 +64,3 @@ networks:
 
 volumes:
   crypto-dwh:
-  crypto-checkpoints:
-  kafka-data:
-  zookeeper-data:
