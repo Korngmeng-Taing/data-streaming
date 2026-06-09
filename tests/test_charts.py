@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 from dash_app.charts import build_main_price_chart, build_technical_chart
 
 

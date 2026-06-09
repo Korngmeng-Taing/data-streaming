@@ -2,7 +2,8 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from config.timezone import PHNOM_PENH_TZ
 
 import aiokafka
 import websockets
@@ -71,7 +72,7 @@ async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         "clients": len(CLIENTS),
         "last_update": last_update,
         "last_update_iso": (
-            datetime.fromtimestamp(last_update, tz=timezone.utc).isoformat()
+            datetime.fromtimestamp(last_update, tz=PHNOM_PENH_TZ).isoformat()
             if last_update else None
         ),
         "topic": KAFKA_TOPIC,

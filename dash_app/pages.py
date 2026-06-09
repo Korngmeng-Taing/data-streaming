@@ -1,9 +1,11 @@
-from dash import dcc, html
+import dash
+from dash import dcc, html, Input, Output, callback
 import dash_bootstrap_components as dbc
 import pandas as pd
 
 from config.logging_config import setup_logger
 from dash_app.data_utils import df_from_store
+from dash_app.session_manager import list_sessions, load_session_csv
 from dash_app.charts import (
     build_main_price_chart, build_volume_chart, build_change_chart,
     build_distribution_chart, build_volatility_chart,
@@ -522,3 +524,100 @@ def make_alerts(gold, silver, sel_coins, data):
         html.H5("Alert History", className="mt-4"),
         html.Div(id="alert-history-list"),
     ])
+
+
+def make_sessions():
+    sessions = list_sessions()
+    if not sessions:
+        return html.Div([
+            html.H3("Session History", className="mb-3"),
+            dbc.Alert("No session data recorded yet. Data is saved when the project shuts down.", color="info"),
+        ])
+
+    rows = []
+    for s in sessions:
+        rows.append(html.Tr([
+            html.Td(s["timestamp"]),
+            html.Td(f"{s['rows']:,}"),
+            html.Td(f"{s['size_kb']} KB"),
+            html.Td(", ".join(s["columns"][:6])),
+            html.Td(dbc.Button("View", id={"type": "view-session", "index": s["filename"]},
+                               size="sm", color="primary")),
+            html.Td(dbc.Button("Download CSV", id={"type": "dl-session", "index": s["filename"]},
+                               size="sm", color="secondary")),
+        ]))
+
+    return html.Div([
+        html.H3("Session History", className="mb-3"),
+        html.P("Each session is automatically saved as CSV when the project shuts down.",
+               style={"color": "#aaa"}),
+        dbc.Table(
+            [html.Thead(html.Tr([
+                html.Th("Session Start"),
+                html.Th("Records"),
+                html.Th("Size"),
+                html.Th("Columns"),
+                html.Th(""),
+                html.Th(""),
+            ])),
+             html.Tbody(rows)],
+            striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
+        ),
+        html.Hr(),
+        html.Div(id="session-viewer"),
+        dcc.Download(id="session-download"),
+    ])
+
+
+@callback(
+    Output("session-viewer", "children"),
+    Input({"type": "view-session", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def view_session(n_clicks):
+    if not any(n for n in n_clicks if n):
+        return dash.no_update
+    triggered_id = callback.context.triggered_id
+    if not triggered_id or "index" not in triggered_id:
+        return dash.no_update
+    filename = triggered_id["index"]
+    sessions = list_sessions()
+    match = next((s for s in sessions if s["filename"] == filename), None)
+    if not match:
+        return dbc.Alert("Session file not found.", color="danger")
+    df = load_session_csv(match["path"])
+    if df.empty:
+        return dbc.Alert("Failed to load session data.", color="danger")
+
+    preview = df.head(100)
+    tc = next((c for c in ("window_start", "fetched_at") if c in preview.columns), None)
+    if tc:
+        preview = preview.sort_values(tc, ascending=False)
+
+    return html.Div([
+        html.H5(f"Session: {filename}", className="mt-3 mb-2"),
+        html.P(f"Showing {len(preview)} of {len(df)} rows", style={"color": "#aaa"}),
+        dbc.Table.from_dataframe(preview, striped=True, bordered=False,
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
+    ])
+
+
+@callback(
+    Output("session-download", "data"),
+    Input({"type": "dl-session", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_session_csv(n_clicks):
+    if not any(n for n in n_clicks if n):
+        return dash.no_update
+    triggered_id = callback.context.triggered_id
+    if not triggered_id or "index" not in triggered_id:
+        return dash.no_update
+    filename = triggered_id["index"]
+    sessions = list_sessions()
+    match = next((s for s in sessions if s["filename"] == filename), None)
+    if not match:
+        return dash.no_update
+    with open(match["path"], encoding="utf-8") as f:
+        content = f.read()
+    return dcc.send_string(content, filename)

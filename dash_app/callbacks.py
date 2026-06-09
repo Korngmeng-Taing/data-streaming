@@ -8,14 +8,16 @@ from dash import dcc, html, callback, Input, Output, State, ctx, no_update, clie
 import dash_bootstrap_components as dbc
 
 from config.logging_config import setup_logger
+from config.timezone import PHNOM_PENH_TZ
 from dash_app.data_utils import (
     _load_all_data, _last_ws_ts, df_from_store, resample_df,
 )
 from dash_app.pages import (
     make_overview, make_predictions, make_pipeline, make_comparison,
-    make_alerts, make_technical, _update_technical_content,
+    make_alerts, make_technical, make_sessions, _update_technical_content,
 )
 from dash_app.alert_store import load_alerts, save_alerts, load_history, save_history
+from dash_app.session_manager import record_data
 from ws_gateway.client import get_last_update
 
 logger = setup_logger("dash_app")
@@ -69,7 +71,9 @@ def refresh_data(n_intervals, interval):
     if n_intervals is not None and n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
         return no_update, no_update
     _last_ws_ts = ws_ts or 0
-    return _load_all_data(interval), time.time()
+    data_json = _load_all_data(interval)
+    record_data(data_json)
+    return data_json, time.time()
 
 
 @callback(
@@ -86,7 +90,9 @@ def ws_refresh(msg, interval):
     if ws_ts is not None and ws_ts <= _last_ws_ts:
         return no_update
     _last_ws_ts = ws_ts or 0
-    return _load_all_data(interval or "1m")
+    data_json = _load_all_data(interval or "1m")
+    record_data(data_json)
+    return data_json
 
 
 # ─── Coin Selection Callbacks ─────────────────────────────────────────
@@ -326,7 +332,7 @@ def check_alerts(_, data_json):
         if fire:
             msg = f"{coin.upper()} {condition} {threshold}"
             entry = {
-                "time": datetime.now().strftime("%H:%M:%S"),
+                "time": datetime.now(PHNOM_PENH_TZ).strftime("%H:%M:%S"),
                 "coin": coin.upper(),
                 "type": a_type,
                 "message": msg,
@@ -384,7 +390,7 @@ def render_page(pathname, data_json, sel_coins, timeframe, chart_type, time_rang
         gold_rs = gold
 
     page = pathname.strip("/") if pathname else ""
-    if page not in ["overview", "technical", "comparison", "predictions", "pipeline", "alerts"]:
+    if page not in ["overview", "technical", "comparison", "predictions", "pipeline", "alerts", "sessions"]:
         page = "overview"
 
     if page == "overview":
@@ -400,6 +406,8 @@ def render_page(pathname, data_json, sel_coins, timeframe, chart_type, time_rang
         return make_pipeline(gold, silver, coins, data)
     elif page == "alerts":
         return make_alerts(gold, silver, sel_coins or [], data)
+    elif page == "sessions":
+        return make_sessions()
 
     return html.Div(dbc.Alert("Page not found", color="danger"))
 
@@ -433,7 +441,7 @@ def export_csv(n_clicks, pathname, data_json, sel_coins, timeframe, time_range):
         return no_update
 
     csv_str = coin_filter.to_csv(index=False)
-    return dcc.send_string(csv_str, f"crypto_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    return dcc.send_string(csv_str, f"crypto_data_{datetime.now(PHNOM_PENH_TZ).strftime('%Y%m%d_%H%M%S')}.csv")
 
 
 # ─── Sidebar Stats ───────────────────────────────────────────────────

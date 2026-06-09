@@ -44,6 +44,7 @@ PAGES = {
     "predictions": "Price Prediction",
     "pipeline": "Pipeline Status",
     "alerts": "Alerts",
+    "sessions": "Sessions",
 }
 
 NAV_ICONS = {
@@ -53,6 +54,7 @@ NAV_ICONS = {
     "predictions": "bi-cpu",
     "pipeline": "bi-diagram-3",
     "alerts": "bi-bell",
+    "sessions": "bi-clock-history",
 }
 
 sidebar = html.Div(

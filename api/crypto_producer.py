@@ -1,6 +1,7 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from config.timezone import PHNOM_PENH_TZ
 import random
 import os
 
@@ -39,7 +40,7 @@ def generate_mock_prices() -> list[dict]:
     }
 
     records = []
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(PHNOM_PENH_TZ).isoformat()
     
     for coin_id in APIConfig.coin_ids:
         if coin_id in mock_data:
@@ -91,7 +92,7 @@ def fetch_prices() -> list[dict]:
         data = resp.json()
     except requests.exceptions.HTTPError as e:
         if resp.status_code == 429:
-            logger.warning(f"Rate limited (429). Falling back to mock data...")
+            logger.warning("Rate limited (429). Falling back to mock data...")
             return generate_mock_prices()
         else:
             logger.error(f"API fetch failed (HTTP {resp.status_code}): {e}")
@@ -101,7 +102,7 @@ def fetch_prices() -> list[dict]:
         return generate_mock_prices()
 
     records = []
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(PHNOM_PENH_TZ).isoformat()
     for coin_id, values in data.items():
         records.append(
             {

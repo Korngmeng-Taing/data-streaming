@@ -16,7 +16,8 @@ RUN apt-get update && \
     java -version 2>&1 | head -1
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PIP_DEFAULT_TIMEOUT=300
+RUN pip install --no-cache-dir --retries 5 -r requirements.txt
 
 RUN python -c "import pyspark; print(f'PySpark {pyspark.__version__} ready')"
 

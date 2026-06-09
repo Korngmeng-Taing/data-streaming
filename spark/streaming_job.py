@@ -12,7 +12,6 @@ from config.logging_config import setup_logger
 from config.spark_config import get_spark_config
 from dwh.schema.bronze_schema import bronze_schema
 from dwh.schema.silver_schema import silver_schema
-from dwh.schema.gold_schema import gold_schema
 from spark.bronze_layer import write_to_bronze
 from spark.gold_layer import agg_and_write
 from spark.silver_layer import clean_and_write
@@ -140,8 +139,8 @@ def main():
     logger.info(f"Connecting to Kafka: {KAFKA_BOOTSTRAP}, topic: {TOPIC}")
 
     bronze_q = start_bronze(spark)
-    silver_q = start_silver(spark)
-    gold_q = start_gold(spark)
+    start_silver(spark)
+    start_gold(spark)
 
     logger.info("All streaming queries started. Waiting for termination...")
     bronze_q.awaitTermination()
