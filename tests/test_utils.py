@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from viz.utils import sma, bollinger, rsi
+from viz.utils import bollinger, rsi, sma
 
 
 class TestSMA:

@@ -1,4 +1,5 @@
-from prediction.arima import predict_prices as predict_arima, ARIMA_ORDER as ARIMA_ORDER  # noqa: F401
+from prediction.arima import ARIMA_ORDER as ARIMA_ORDER
+from prediction.arima import predict_prices as predict_arima
 from prediction.prophet_model import predict_prices_prophet
 
 

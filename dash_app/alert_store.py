@@ -19,7 +19,17 @@ def _save_json(data: list, path: str):
         json.dump(data, f, indent=2)
 
 
-def load_alerts(): return _load_json(ALERTS_PATH)
-def save_alerts(alerts): _save_json(alerts, ALERTS_PATH)
-def load_history(): return _load_json(HISTORY_PATH)
-def save_history(history): _save_json(history, HISTORY_PATH)
+def load_alerts():
+    return _load_json(ALERTS_PATH)
+
+
+def save_alerts(alerts):
+    _save_json(alerts, ALERTS_PATH)
+
+
+def load_history():
+    return _load_json(HISTORY_PATH)
+
+
+def save_history(history):
+    _save_json(history, HISTORY_PATH)

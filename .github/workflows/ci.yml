@@ -30,10 +30,10 @@ jobs:
           pip install ruff pytest
 
       - name: Lint with ruff
-        run: ruff check dash_app/ prediction/ tests/ ws_gateway/ config/
+        run: ruff check dash_app/ prediction/ tests/ pipeline/ config/
 
       - name: Test with pytest
-        run: python -m pytest tests/ -v --tb=short --ignore=tests/test_bronze_layer.py
+        run: python -m pytest tests/ -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}
 
