@@ -1,8 +1,12 @@
+import dash
+from dash import dcc, html, Input, Output, callback, ctx
 import dash_bootstrap_components as dbc
 import pandas as pd
 from dash import dash_table, dcc, html
 
 from config.logging_config import setup_logger
+from dash_app.data_utils import APP_START_TIME, df_from_store, list_session_files
+from dash_app.session_manager import list_sessions, load_session_csv
 from dash_app.charts import (
     build_change_chart,
     build_correlation_chart,
@@ -16,7 +20,6 @@ from dash_app.charts import (
     build_volume_chart,
     build_volume_comparison_chart,
 )
-from dash_app.data_utils import APP_START_TIME, df_from_store, list_session_files
 from prediction import ARIMA_ORDER, predict_prices
 
 logger = setup_logger("dash_app")
@@ -131,7 +134,7 @@ def make_overview(
         )
 
     fig_dist = build_distribution_chart(coin_filter, sel_coins, vc)
-    fig_vola = build_volatility_chart(coin_filter, sel_coins, tc, voc, use_gold)
+    fig_vola = build_volatility_chart(coin_filter, sel_coins, tc, voc)
 
     recent = coin_filter.sort_values(tc, ascending=False).head(25)
     if not recent.empty and tc in recent.columns:
@@ -152,69 +155,36 @@ def make_overview(
         else "[]"
     )
 
-    return html.Div(
-        [
-            html.H3("Overview", className="mb-3"),
-            html.Small(
-                f"Layer: {'Gold' if use_gold else 'Silver'} ({tf_label}) · "
-                f"{len(sel_coins)} coins · {now_val}",
-                className="text-muted",
-            ),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.Label(
-                                "Export",
-                                style={"font-size": "0.85rem", "color": "#aaa"},
-                            ),
-                            dbc.Button(
-                                "Download CSV",
-                                id=export_id,
-                                color="secondary",
-                                size="sm",
-                                style={"font-size": "0.8rem"},
-                            ),
-                            dcc.Download(id="download-csv"),
-                        ],
-                        xs=12,
-                        sm=6,
-                        md=3,
-                    ),
-                ],
-                className="mb-3",
-            ),
-            html.Div(dbc.Row(cards), className="mt-3 mb-4"),
-            dcc.Graph(figure=fig_main, className="mb-4"),
-            dbc.Row(
-                [
-                    dbc.Col(dcc.Graph(figure=fig_vol), xs=12, md=6),
-                    dbc.Col(dcc.Graph(figure=fig_chg), xs=12, md=6),
-                ],
-                className="mb-4",
-            ),
-            dbc.Row(
-                [
-                    dbc.Col(dcc.Graph(figure=fig_dist), xs=12, md=6),
-                    dbc.Col(dcc.Graph(figure=fig_vola), xs=12, md=6),
-                ],
-                className="mb-4",
-            ),
-            html.H5("Recent Data", className="mt-4 mb-2"),
-            dbc.Table.from_dataframe(
-                recent.head(20),
-                striped=True,
-                bordered=False,
-                class_name="table-dark",
-                hover=True,
-                responsive=True,
-                size="sm",
-            ),
-            html.Div(
-                id="recent-data-json", style={"display": "none"}, children=recent_json
-            ),
-        ]
-    )
+    return html.Div([
+        html.H3("Overview", className="mb-3"),
+        html.Small(
+            f"Layer: {'Gold' if use_gold else 'Silver'} ({tf_label}) · "
+            f"{len(sel_coins)} coins · {now_val}",
+            className="text-muted",
+        ),
+        dbc.Row([
+            dbc.Col([
+                html.Label("Export", style={"font-size": "0.85rem", "color": "#aaa"}),
+                dbc.Button("Download CSV", id=export_id, color="secondary", size="sm",
+                           style={"font-size": "0.8rem"}),
+                dcc.Download(id="download-csv"),
+            ], xs=12, sm=6, md=3),
+        ], className="mb-3"),
+        html.Div(dbc.Row(cards), className="mt-3 mb-4"),
+        dcc.Graph(figure=fig_main, className="mb-4"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_vol), xs=12, md=6),
+            dbc.Col(dcc.Graph(figure=fig_chg), xs=12, md=6),
+        ], className="mb-4"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_dist), xs=12, md=6),
+            dbc.Col(dcc.Graph(figure=fig_vola), xs=12, md=6),
+        ], className="mb-4"),
+        html.H5("Recent Data", className="mt-4 mb-2"),
+        dbc.Table.from_dataframe(recent.head(20), striped=True, bordered=False,
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
+        html.Div(id="recent-data-json", style={"display": "none"}, children=recent_json),
+    ])
 
 
 def make_technical(gold, silver, sel_coins, data):
@@ -847,74 +817,130 @@ def make_pipeline(gold, silver, coins, data):
 
 
 def make_alerts(gold, silver, sel_coins, data):
-    return html.Div(
-        [
-            html.H3("Alert System"),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.H5("Create Alert"),
-                            dbc.Card(
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label("Coin"),
-                                        dcc.Dropdown(
-                                            id="alert-coin",
-                                            options=[
-                                                {"label": c.upper(), "value": c}
-                                                for c in sel_coins
-                                            ],
-                                            value=sel_coins[0] if sel_coins else None,
-                                            style={"color": "#000"},
-                                        ),
-                                        dbc.Label("Type", className="mt-2"),
-                                        dcc.Dropdown(
-                                            id="alert-type",
-                                            options=[
-                                                {
-                                                    "label": "Price threshold",
-                                                    "value": "price",
-                                                },
-                                                {
-                                                    "label": "24h Change %",
-                                                    "value": "change_24h",
-                                                },
-                                            ],
-                                            value="price",
-                                            style={"color": "#000"},
-                                        ),
-                                        html.Div(id="alert-config"),
-                                        dbc.Button(
-                                            "Add Alert",
-                                            id="add-alert-btn",
-                                            color="primary",
-                                            className="mt-3",
-                                            n_clicks=0,
-                                        ),
-                                    ]
-                                ),
-                                color="dark",
-                                inverse=True,
-                            ),
-                        ],
-                        xs=12,
-                        md=6,
-                    ),
-                    dbc.Col(
-                        [
-                            html.H5("Active Alerts"),
-                            html.Div(id="active-alerts-list"),
-                        ],
-                        xs=12,
-                        md=6,
-                    ),
-                ]
-            ),
-            html.H5("Alert History", className="mt-4"),
-            html.Div(id="alert-history-list"),
-        ]
-    )
+    return html.Div([
+        html.H3("Alert System"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Create Alert"),
+                dbc.Card(dbc.CardBody([
+                    dbc.Label("Coin"),
+                    dcc.Dropdown(id="alert-coin", options=[{"label": c.upper(), "value": c} for c in sel_coins],
+                                 value=sel_coins[0] if sel_coins else None, style={"color": "#000"}),
+                    dbc.Label("Type", className="mt-2"),
+                    dcc.Dropdown(id="alert-type", options=[
+                        {"label": "Price threshold", "value": "price"},
+                        {"label": "24h Change %", "value": "change_24h"},
+                    ], value="price", style={"color": "#000"}),
+                    html.Div(id="alert-config"),
+                    dbc.Button("Add Alert", id="add-alert-btn", color="primary", className="mt-3", n_clicks=0),
+                ]), color="dark", inverse=True),
+            ], xs=12, md=6),
+            dbc.Col([
+                html.H5("Active Alerts"),
+                html.Div(id="active-alerts-list"),
+            ], xs=12, md=6),
+        ]),
+        html.H5("Alert History", className="mt-4"),
+        html.Div(id="alert-history-list"),
+    ])
+
+
+def make_sessions():
+    sessions = list_sessions()
+    if not sessions:
+        return html.Div([
+            html.H3("Session History", className="mb-3"),
+            dbc.Alert("No session data recorded yet. Data is saved when the project shuts down.", color="info"),
+        ])
+
+    rows = []
+    for s in sessions:
+        rows.append(html.Tr([
+            html.Td(s["timestamp"]),
+            html.Td(f"{s['rows']:,}"),
+            html.Td(f"{s['size_kb']} KB"),
+            html.Td(", ".join(s["columns"][:6])),
+            html.Td(dbc.Button("View", id={"type": "view-session", "index": s["filename"].replace(".csv", "")},
+                               size="sm", color="primary")),
+            html.Td(dbc.Button("Download CSV", id={"type": "dl-session", "index": s["filename"].replace(".csv", "")},
+                               size="sm", color="secondary")),
+        ]))
+
+    return html.Div([
+        html.H3("Session History", className="mb-3"),
+        html.P("Each session is automatically saved as CSV when the project shuts down.",
+               style={"color": "#aaa"}),
+        dbc.Table(
+            [html.Thead(html.Tr([
+                html.Th("Session Start"),
+                html.Th("Records"),
+                html.Th("Size"),
+                html.Th("Columns"),
+                html.Th(""),
+                html.Th(""),
+            ])),
+             html.Tbody(rows)],
+            striped=True, bordered=False, class_name="table-dark", hover=True, responsive=True, size="sm",
+        ),
+        html.Hr(),
+        html.Div(id="session-viewer"),
+        dcc.Download(id="session-download"),
+    ])
+
+
+@callback(
+    Output("session-viewer", "children"),
+    Input({"type": "view-session", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def view_session(n_clicks):
+    if not any(n for n in n_clicks if n):
+        return dash.no_update
+    triggered_id = ctx.triggered_id
+    if not triggered_id or "index" not in triggered_id:
+        return dash.no_update
+    filename = triggered_id["index"] + ".csv"
+    sessions = list_sessions()
+    match = next((s for s in sessions if s["filename"] == filename), None)
+    if not match:
+        return dbc.Alert("Session file not found.", color="danger")
+    df = load_session_csv(match["path"])
+    if df.empty:
+        return dbc.Alert("Failed to load session data.", color="danger")
+
+    preview = df.head(100)
+    tc = next((c for c in ("window_start", "fetched_at") if c in preview.columns), None)
+    if tc:
+        preview = preview.sort_values(tc, ascending=False)
+
+    return html.Div([
+        html.H5(f"Session: {triggered_id['index']}", className="mt-3 mb-2"),
+        html.P(f"Showing {len(preview)} of {len(df)} rows", style={"color": "#aaa"}),
+        dbc.Table.from_dataframe(preview, striped=True, bordered=False,
+                                 class_name="table-dark", hover=True, responsive=True, size="sm"),
+    ])
+
+
+@callback(
+    Output("session-download", "data"),
+    Input({"type": "dl-session", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def download_session_csv(n_clicks):
+    if not any(n for n in n_clicks if n):
+        return dash.no_update
+    triggered_id = ctx.triggered_id
+    if not triggered_id or "index" not in triggered_id:
+        return dash.no_update
+    filename_key = triggered_id["index"]
+    filename = filename_key + ".csv"
+    sessions = list_sessions()
+    match = next((s for s in sessions if s["filename"] == filename), None)
+    if not match:
+        return dash.no_update
+    with open(match["path"], encoding="utf-8") as f:
+        content = f.read()
+    return dcc.send_string(content, filename)
 
 
 def make_data_explorer(gold, silver, sel_coins, data, time_range="all", tz_offset=0):
@@ -925,16 +951,10 @@ def make_data_explorer(gold, silver, sel_coins, data, time_range="all", tz_offse
     session_files = list_session_files()
 
     if df.empty and not session_files:
-        return html.Div(
-            [
-                html.H3("Data Explorer"),
-                dbc.Alert(
-                    "No data available in either Gold or Silver layers.",
-                    color="warning",
-                    className="mt-3",
-                ),
-            ]
-        )
+        return html.Div([
+            html.H3("Data Explorer"),
+            dbc.Alert("No data available in either Gold or Silver layers.", color="warning", className="mt-3"),
+        ])
 
     tc = "window_start" if use_gold else "fetched_at"
     if tc in df.columns:
@@ -946,118 +966,54 @@ def make_data_explorer(gold, silver, sel_coins, data, time_range="all", tz_offse
 
     display_df = df.head(500)
     ts_label = {
-        "session": "Session",
-        "all": "All time",
-        "30m": "30 min",
-        "1h": "1 hour",
-        "6h": "6 hours",
-        "24h": "24 hours",
+        "session": "Session", "all": "All time", "30m": "30 min",
+        "1h": "1 hour", "6h": "6 hours", "24h": "24 hours",
     }.get(time_range, time_range)
 
     export_id = "data-export-csv-btn"
-    display_json = (
-        display_df.to_json(date_format="iso", orient="records")
-        if not display_df.empty
-        else "[]"
-    )
+    display_json = display_df.to_json(date_format="iso", orient="records") if not display_df.empty else "[]"
 
     session_dropdown = html.Div()
     if session_files:
-        session_dropdown = html.Div(
-            [
-                html.Label(
-                    "Load Past Session",
-                    style={
-                        "font-size": "0.85rem",
-                        "color": "#aaa",
-                        "margin-bottom": "4px",
-                    },
-                ),
-                dcc.Dropdown(
-                    id="session-select",
-                    options=[{"label": f, "value": f} for f in session_files],
-                    placeholder="Select a session CSV...",
-                    style={"color": "#000", "font-size": "0.85rem"},
-                ),
-                html.Div(id="session-data-display"),
-            ],
-            className="mt-3",
-        )
+        session_dropdown = html.Div([
+            html.Label("Load Past Session", style={"font-size": "0.85rem", "color": "#aaa", "margin-bottom": "4px"}),
+            dcc.Dropdown(
+                id="session-select",
+                options=[{"label": f, "value": f} for f in session_files],
+                placeholder="Select a session CSV...",
+                style={"color": "#000", "font-size": "0.85rem"},
+            ),
+            html.Div(id="session-data-display"),
+        ], className="mt-3")
 
-    return html.Div(
-        [
-            html.H3("Data Explorer"),
-            html.P(
-                [
-                    html.Span(
-                        f"Viewing {layer_name} layer ({ts_label}). ",
-                        className="text-muted",
-                    ),
-                    html.Span(
-                        f"Showing {len(display_df)} of {len(df)} total rows.",
-                        className="fw-bold",
-                    ),
-                ]
-            ),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            dbc.Button(
-                                "Download CSV",
-                                id=export_id,
-                                color="secondary",
-                                size="sm",
-                                style={"font-size": "0.8rem"},
-                            ),
-                            dcc.Download(id="data-download-csv"),
-                        ],
-                        xs="auto",
-                    ),
-                ],
-                className="mb-3",
-            ),
-            dbc.Card(
-                [
-                    dbc.CardHeader("Raw Data Table"),
-                    dbc.CardBody(
-                        [
-                            dash_table.DataTable(
-                                data=display_df.to_dict("records"),
-                                columns=[
-                                    {"name": i, "id": i} for i in display_df.columns
-                                ],
-                                page_size=20,
-                                sort_action="native",
-                                filter_action="native",
-                                style_table={"overflowX": "auto"},
-                                style_cell={
-                                    "backgroundColor": "#1e1e1e",
-                                    "color": "white",
-                                    "textAlign": "left",
-                                    "padding": "10px",
-                                    "border": "1px solid #333",
-                                },
-                                style_header={
-                                    "backgroundColor": "#333",
-                                    "fontWeight": "bold",
-                                    "border": "1px solid #444",
-                                },
-                                style_data_conditional=[
-                                    {
-                                        "if": {"row_index": "odd"},
-                                        "backgroundColor": "#252525",
-                                    }
-                                ],
-                            )
-                        ]
-                    ),
-                ],
-                className="mt-3 shadow-sm",
-            ),
-            session_dropdown,
-            html.Div(
-                id="data-export-json", style={"display": "none"}, children=display_json
-            ),
-        ]
-    )
+    return html.Div([
+        html.H3("Data Explorer"),
+        html.P([
+            html.Span(f"Viewing {layer_name} layer ({ts_label}). ", className="text-muted"),
+            html.Span(f"Showing {len(display_df)} of {len(df)} total rows.", className="fw-bold"),
+        ]),
+        dbc.Row([
+            dbc.Col([
+                dbc.Button("Download CSV", id=export_id, color="secondary", size="sm",
+                           style={"font-size": "0.8rem"}),
+                dcc.Download(id="data-download-csv"),
+            ], xs="auto"),
+        ], className="mb-3"),
+        dbc.Card([
+            dbc.CardHeader("Raw Data Table"),
+            dbc.CardBody([
+                dash_table.DataTable(
+                    data=display_df.to_dict("records"),
+                    columns=[{"name": i, "id": i} for i in display_df.columns],
+                    page_size=20, sort_action="native", filter_action="native",
+                    style_table={"overflowX": "auto"},
+                    style_cell={"backgroundColor": "#1e1e1e", "color": "white", "textAlign": "left",
+                                 "padding": "10px", "border": "1px solid #333"},
+                    style_header={"backgroundColor": "#333", "fontWeight": "bold", "border": "1px solid #444"},
+                    style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#252525"}],
+                )
+            ]),
+        ], className="mt-3 shadow-sm"),
+        session_dropdown,
+        html.Div(id="data-export-json", style={"display": "none"}, children=display_json),
+    ])

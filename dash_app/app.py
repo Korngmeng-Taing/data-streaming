@@ -56,6 +56,7 @@ PAGES = {
     "data": "Data Explorer",
     "pipeline": "Pipeline Status",
     "alerts": "Alerts",
+    "sessions": "Sessions",
 }
 
 NAV_ICONS = {
@@ -66,6 +67,7 @@ NAV_ICONS = {
     "data": "bi-table",
     "pipeline": "bi-diagram-3",
     "alerts": "bi-bell",
+    "sessions": "bi-clock-history",
 }
 
 sidebar = html.Div(

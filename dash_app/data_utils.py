@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from config.logging_config import setup_logger
+from config.timezone import PHNOM_PENH_TZ
 
 logger = setup_logger("dash_app")
 
@@ -18,6 +19,8 @@ OUTPUT_PATH = os.getenv("OUTPUT_PATH", "/tmp/crypto-dwh")
 GOLD_PATH = f"{OUTPUT_PATH}/gold"
 SILVER_PATH = f"{OUTPUT_PATH}/silver"
 SESSIONS_PATH = f"{OUTPUT_PATH}/sessions"
+
+SESSION_START = datetime.now()
 
 _parquet_cache: dict[str, tuple[pd.DataFrame, float]] = {}
 _cache_lock = threading.Lock()
@@ -40,12 +43,19 @@ def load_parquet(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def prepare_df(
-    df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list[str]
-) -> pd.DataFrame:
+def _utc_to_phnom_penh(s: pd.Series) -> pd.Series:
+    try:
+        return s.dt.tz_localize("UTC").dt.tz_convert(PHNOM_PENH_TZ).dt.tz_localize(None)
+    except Exception:
+        return s
+
+
+def prepare_df(df: pd.DataFrame, time_col: str, value_col: str, extra_cols: list[str]) -> pd.DataFrame:
     for c in df.select_dtypes(include=["object"]):
         if c == time_col:
             df[c] = pd.to_datetime(df[c], errors="coerce")
+    if time_col in df.columns:
+        df[time_col] = _utc_to_phnom_penh(df[time_col])
     num_cols = [value_col] + [c for c in extra_cols if c in df.columns]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -99,11 +109,11 @@ def resample_df(df: pd.DataFrame, interval: str, time_col: str) -> pd.DataFrame:
 
 
 MOCK_COINS = [
-    {"id": "bitcoin", "base_price": 65000, "volatility": 800},
-    {"id": "ethereum", "base_price": 3200, "volatility": 120},
-    {"id": "solana", "base_price": 140, "volatility": 8},
-    {"id": "cardano", "base_price": 0.6, "volatility": 0.05},
-    {"id": "polkadot", "base_price": 7.5, "volatility": 0.4},
+    {"id": "bitcoin", "base_price": 63000, "volatility": 800},
+    {"id": "ethereum", "base_price": 1700, "volatility": 120},
+    {"id": "solana", "base_price": 67, "volatility": 8},
+    {"id": "cardano", "base_price": 0.35, "volatility": 0.05},
+    {"id": "polkadot", "base_price": 6.5, "volatility": 0.4},
 ]
 
 
@@ -180,9 +190,23 @@ def _generate_mock_data():
     return pd.DataFrame(gold_rows), pd.DataFrame(silver_rows)
 
 
+def _filter_session_data(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
+    if df.empty or time_col not in df.columns:
+        return df
+    try:
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        return df[df[time_col] >= SESSION_START]
+    except Exception:
+        return df
+
+
 def _load_all_data(interval: str) -> str:
     gold = load_parquet(GOLD_PATH)
     silver = load_parquet(SILVER_PATH)
+
+    gold = _filter_session_data(gold, "window_start")
+    silver = _filter_session_data(silver, "fetched_at")
+
     use_mock = gold.empty and silver.empty
     result = {}
 
@@ -237,7 +261,7 @@ def _load_all_data(interval: str) -> str:
                 if isinstance(r, dict) and "coin_id" in r:
                     coins.add(r["coin_id"])
     result["coins"] = sorted(coins)
-    result["updated_at"] = datetime.now().isoformat()
+    result["updated_at"] = _utc_to_phnom_penh(pd.Series([datetime.now()])).iloc[0].isoformat()
 
     return json.dumps(result, default=str)
 

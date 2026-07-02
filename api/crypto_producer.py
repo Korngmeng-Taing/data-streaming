@@ -2,7 +2,8 @@ import json
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from config.timezone import PHNOM_PENH_TZ
 
 import requests
 
@@ -18,32 +19,31 @@ RAW_PATH = f"{OUTPUT_PATH}/raw"
 def generate_mock_prices() -> list[dict]:
     mock_data = {
         "bitcoin": {
-            "price_range": (35000, 45000),
+            "price_range": (60000, 66000),
             "volume_range": (20e9, 30e9),
         },
         "ethereum": {
-            "price_range": (1800, 2500),
+            "price_range": (1600, 1800),
             "volume_range": (10e9, 20e9),
         },
         "solana": {
-            "price_range": (60, 150),
+            "price_range": (60, 75),
             "volume_range": (1e9, 3e9),
         },
         "cardano": {
-            "price_range": (0.4, 1.0),
+            "price_range": (0.30, 0.40),
             "volume_range": (0.5e9, 2e9),
         },
         "polkadot": {
-            "price_range": (5, 15),
+            "price_range": (5.5, 7.5),
             "volume_range": (0.5e9, 2e9),
         },
     }
 
     records = []
-    now = datetime.now(timezone.utc)
-    ts_iso = now.isoformat()
-    ts_unix = int(now.timestamp())
-
+    ts = datetime.now(PHNOM_PENH_TZ).isoformat()
+    ts_unix = int(datetime.now(PHNOM_PENH_TZ).timestamp())
+    ts_iso = ts
     for coin_id in APIConfig.coin_ids:
         if coin_id in mock_data:
             config = mock_data[coin_id]
@@ -105,7 +105,7 @@ def fetch_prices() -> list[dict]:
         return generate_mock_prices()
 
     records = []
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(PHNOM_PENH_TZ).isoformat()
     for coin_id, values in data.items():
         records.append(
             {

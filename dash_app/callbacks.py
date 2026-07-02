@@ -19,6 +19,7 @@ from dash import (
 )
 
 from config.logging_config import setup_logger
+from config.timezone import PHNOM_PENH_TZ
 from dash_app.alert_store import load_alerts, load_history, save_alerts, save_history
 from dash_app.data_utils import (
     _load_all_data,
@@ -34,8 +35,11 @@ from dash_app.pages import (
     make_overview,
     make_pipeline,
     make_predictions,
+    make_sessions,
     make_technical,
 )
+from dash_app.session_manager import record_data
+from ws_gateway.client import get_last_update
 
 logger = setup_logger("dash_app")
 
@@ -91,11 +95,43 @@ def toggle_theme(val):
 
 @callback(
     Output("data-store", "data"),
+    Output("ws-last-update", "data"),
     Input("data-timer", "n_intervals"),
     State("timeframe-select", "value"),
 )
 def refresh_data(n_intervals, interval):
+<<<<<<< HEAD
+    global _last_ws_ts
+    interval = interval or "1m"
+    ws_ts = get_last_update()
+    if n_intervals is not None and n_intervals > 0 and ws_ts is not None and ws_ts <= _last_ws_ts:
+        return no_update, no_update
+    _last_ws_ts = ws_ts or 0
+    data_json = _load_all_data(interval)
+    record_data(data_json)
+    return data_json, time.time()
+
+
+@callback(
+    Output("data-store", "data", allow_duplicate=True),
+    Input("ws", "message"),
+    State("timeframe-select", "value"),
+    prevent_initial_call=True,
+)
+def ws_refresh(msg, interval):
+    global _last_ws_ts
+    if not msg:
+        return no_update
+    ws_ts = get_last_update()
+    if ws_ts is not None and ws_ts <= _last_ws_ts:
+        return no_update
+    _last_ws_ts = ws_ts or 0
+    data_json = _load_all_data(interval or "1m")
+    record_data(data_json)
+    return data_json
+=======
     return _load_all_data(interval or "1m")
+>>>>>>> origin/main
 
 
 # ─── Coin Selection Callbacks ─────────────────────────────────────────
@@ -382,7 +418,7 @@ def check_alerts(_, data_json):
         if fire:
             msg = f"{coin.upper()} {condition} {threshold}"
             entry = {
-                "time": datetime.now().strftime("%H:%M:%S"),
+                "time": datetime.now(PHNOM_PENH_TZ).strftime("%H:%M:%S"),
                 "coin": coin.upper(),
                 "type": a_type,
                 "message": msg,
@@ -454,15 +490,7 @@ def render_page(
     tz_offset = client_tz_offset or 0
 
     page = pathname.strip("/") if pathname else ""
-    if page not in [
-        "overview",
-        "technical",
-        "comparison",
-        "predictions",
-        "data",
-        "pipeline",
-        "alerts",
-    ]:
+    if page not in ["overview", "technical", "comparison", "predictions", "data", "pipeline", "alerts", "sessions"]:
         page = "overview"
 
     if not sel_coins and coins:
@@ -493,6 +521,8 @@ def render_page(
         return make_pipeline(gold, silver, coins, data)
     if page == "alerts":
         return make_alerts(gold, silver, sel_coins or [], data)
+    elif page == "sessions":
+        return make_sessions()
 
     return html.Div(dbc.Alert("Page not found", color="danger"))
 
@@ -526,9 +556,7 @@ def export_csv(n_clicks, pathname, data_json, sel_coins, timeframe, time_range):
         return no_update
 
     csv_str = coin_filter.to_csv(index=False)
-    return dcc.send_string(
-        csv_str, f"crypto_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    )
+    return dcc.send_string(csv_str, f"crypto_data_{datetime.now(PHNOM_PENH_TZ).strftime('%Y%m%d_%H%M%S')}.csv")
 
 
 @callback(
@@ -562,7 +590,7 @@ def export_data_csv(n_clicks, data_json, sel_coins, time_range):
     suffix = time_range if time_range and time_range != "all" else "full"
     csv_str = df.to_csv(index=False)
     return dcc.send_string(
-        csv_str, f"crypto_data_{suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_str, f"crypto_data_{suffix}_{datetime.now(PHNOM_PENH_TZ).strftime('%Y%m%d_%H%M%S')}.csv"
     )
 
 
