@@ -104,11 +104,11 @@ def set_last_ws_payload(payload: str | None):
 
 
 MOCK_COINS = [
-    {"id": "bitcoin", "base_price": 65000, "volatility": 800},
-    {"id": "ethereum", "base_price": 3200, "volatility": 120},
-    {"id": "solana", "base_price": 140, "volatility": 8},
-    {"id": "cardano", "base_price": 0.6, "volatility": 0.05},
-    {"id": "polkadot", "base_price": 7.5, "volatility": 0.4},
+    {"id": "bitcoin", "base_price": 63000, "volatility": 800},
+    {"id": "ethereum", "base_price": 1700, "volatility": 120},
+    {"id": "solana", "base_price": 67, "volatility": 8},
+    {"id": "cardano", "base_price": 0.35, "volatility": 0.05},
+    {"id": "polkadot", "base_price": 6.5, "volatility": 0.4},
 ]
 
 

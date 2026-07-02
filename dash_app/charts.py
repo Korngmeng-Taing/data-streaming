@@ -106,27 +106,16 @@ def build_distribution_chart(coin_filter, sel_coins, vc):
     return fig
 
 
-def build_volatility_chart(coin_filter, sel_coins, tc, voc, use_gold):
+def build_volatility_chart(coin_filter, sel_coins, tc, voc):
     fig = go.Figure()
-    if not use_gold:
-        for coin in sel_coins:
-            cdf = coin_filter[coin_filter["coin_id"] == coin].sort_values(tc)
-            if cdf.empty:
-                continue
-            fig.add_trace(go.Scatter(
-                x=cdf[tc], y=cdf[voc] if voc in cdf.columns else [],
-                mode="lines", name=coin.upper(),
-            ))
-    else:
-        for coin in sel_coins:
-            cdf = coin_filter[coin_filter["coin_id"] == coin].sort_values(tc)
-            if cdf.empty or "price_volatility" not in cdf.columns:
-                continue
-            fig.add_trace(go.Scatter(
-                x=cdf[tc], y=cdf["price_volatility"], mode="lines", name=coin.upper(),
-                line=dict(width=2),
-                hovertemplate=f"<b>{coin.upper()}</b><br>%{{x}}<br>%{{y:.4f}}<extra></extra>",
-            ))
+    for coin in sel_coins:
+        cdf = coin_filter[coin_filter["coin_id"] == coin].sort_values(tc)
+        if cdf.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=cdf[tc], y=cdf[voc] if voc in cdf.columns else [],
+            mode="lines", name=coin.upper(),
+        ))
     fig.update_layout(
         title="Price Volatility",
         template="plotly_dark", height=250, margin=dict(l=20, r=20, t=40, b=20),

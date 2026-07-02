@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output, callback
+from dash import dcc, html, Input, Output, callback, ctx
 import dash_bootstrap_components as dbc
 import pandas as pd
 
@@ -30,14 +30,7 @@ def _filter_time_range(df, tc, time_range):
 
 
 def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="line", time_range="all"):
-    use_gold = not gold.empty
-    if use_gold:
-        df = gold
-        tc = "window_start"
-        vc = "avg_price"
-        voc = "avg_volume"
-        cc = "avg_change_pct"
-    elif not silver.empty:
+    if not silver.empty:
         df = silver
         tc = "fetched_at"
         vc = "price_usd"
@@ -78,7 +71,7 @@ def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="lin
         ))
 
     fig_dist = build_distribution_chart(coin_filter, sel_coins, vc)
-    fig_vola = build_volatility_chart(coin_filter, sel_coins, tc, voc, use_gold)
+    fig_vola = build_volatility_chart(coin_filter, sel_coins, tc, voc)
 
     recent = coin_filter.sort_values(tc, ascending=False).head(25)
     if not recent.empty and tc in recent.columns:
@@ -91,7 +84,7 @@ def make_overview(gold, silver, sel_coins, data, timeframe="1m", chart_type="lin
 
     return html.Div([
         html.H3("Overview", className="mb-3"),
-        html.Small(f"Layer: {'Gold' if use_gold else 'Silver'} ({tf_label}) · "
+        html.Small(f"Layer: Silver ({tf_label}) · "
                    f"{len(sel_coins)} coins · {now_val}", className="text-muted"),
         dbc.Row([
             dbc.Col([
@@ -541,9 +534,9 @@ def make_sessions():
             html.Td(f"{s['rows']:,}"),
             html.Td(f"{s['size_kb']} KB"),
             html.Td(", ".join(s["columns"][:6])),
-            html.Td(dbc.Button("View", id={"type": "view-session", "index": s["filename"]},
+            html.Td(dbc.Button("View", id={"type": "view-session", "index": s["filename"].replace(".csv", "")},
                                size="sm", color="primary")),
-            html.Td(dbc.Button("Download CSV", id={"type": "dl-session", "index": s["filename"]},
+            html.Td(dbc.Button("Download CSV", id={"type": "dl-session", "index": s["filename"].replace(".csv", "")},
                                size="sm", color="secondary")),
         ]))
 
@@ -577,10 +570,10 @@ def make_sessions():
 def view_session(n_clicks):
     if not any(n for n in n_clicks if n):
         return dash.no_update
-    triggered_id = callback.context.triggered_id
+    triggered_id = ctx.triggered_id
     if not triggered_id or "index" not in triggered_id:
         return dash.no_update
-    filename = triggered_id["index"]
+    filename = triggered_id["index"] + ".csv"
     sessions = list_sessions()
     match = next((s for s in sessions if s["filename"] == filename), None)
     if not match:
@@ -595,7 +588,7 @@ def view_session(n_clicks):
         preview = preview.sort_values(tc, ascending=False)
 
     return html.Div([
-        html.H5(f"Session: {filename}", className="mt-3 mb-2"),
+        html.H5(f"Session: {triggered_id['index']}", className="mt-3 mb-2"),
         html.P(f"Showing {len(preview)} of {len(df)} rows", style={"color": "#aaa"}),
         dbc.Table.from_dataframe(preview, striped=True, bordered=False,
                                  class_name="table-dark", hover=True, responsive=True, size="sm"),
@@ -610,10 +603,11 @@ def view_session(n_clicks):
 def download_session_csv(n_clicks):
     if not any(n for n in n_clicks if n):
         return dash.no_update
-    triggered_id = callback.context.triggered_id
+    triggered_id = ctx.triggered_id
     if not triggered_id or "index" not in triggered_id:
         return dash.no_update
-    filename = triggered_id["index"]
+    filename_key = triggered_id["index"]
+    filename = filename_key + ".csv"
     sessions = list_sessions()
     match = next((s for s in sessions if s["filename"] == filename), None)
     if not match:

@@ -83,6 +83,7 @@ services:
       CRYPTO_API_BASE_URL: https://api.coingecko.com/api/v3
       CRYPTO_IDS: bitcoin,ethereum,solana,cardano,polkadot
       VS_CURRENCY: usd
+      USE_MOCK_DATA: "false"
     healthcheck:
       test: pgrep -f "api.crypto_producer" || exit 1
       interval: 15s
